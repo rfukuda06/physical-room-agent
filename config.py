@@ -37,8 +37,8 @@ AUDIO_DEVICE_INDEX = 0  # MacBook Air Microphone
 # We capture live at full res/fps so YOLO's tracker gets crisp input,
 # but store a downsampled copy in the ring buffer (much cheaper RAM-wise,
 # and Gemini/Claude downsample internally anyway).
-CAMERA_CAPTURE_WIDTH = 1920
-CAMERA_CAPTURE_HEIGHT = 1080
+CAMERA_CAPTURE_WIDTH = 1280
+CAMERA_CAPTURE_HEIGHT = 720
 CAMERA_CAPTURE_FPS = 30
 
 BUFFER_FRAME_WIDTH = 1280
@@ -69,11 +69,21 @@ YOLO_INFER_EVERY_N_FRAMES = 1   # bump to 2 if CPU is saturated
 # -- Baselines / calibration --
 CALIBRATION_SECONDS = 300  # 5 min
 
-# -- Zones (pixel regions in the camera frame). Fill in after you see the feed. --
-# Format: {"zone_name": (x, y, w, h)}
-ZONES: dict[str, tuple[int, int, int, int]] = {
-    # "desk": (100, 200, 400, 300),
-    # "door": (800, 100, 200, 500),
+# -- Zones (pixel polygons in the camera frame) --
+# Each zone is a list of (x, y) vertices in pixel space, in order around the
+# polygon. Zones are drawn on the FLOOR, not on the object — e.g., the
+# walkable region in front of the desk, not the desk surface itself. See the
+# module docstring in perception/zone_map.py for why the ground-plane
+# assumption makes foot-pixel queries work from a single camera.
+#
+# Populate by running the click-to-define tool against your live camera:
+#     python -m perception.zone_map
+# It prints a ready-to-paste ZONES block. See SETUP.md §4c for the walkthrough.
+ZONES: dict[str, list[tuple[int, int]]] = {
+    
+    # "desk":  [(412, 603), (887, 598), (901, 842), (388, 847)],
+    # "door":  [(1055, 420), (1260, 418), (1258, 880), (1050, 885)],
+    # "couch": [(120, 700), (610, 695), (605, 940), (115, 945)],
 }
 
 # -- LLM toggles (useful during dev) --

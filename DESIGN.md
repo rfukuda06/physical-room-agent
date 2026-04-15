@@ -9,7 +9,7 @@ Legend:
 
 ---
 
-## Current state (Day 1 — end of Block 3)
+## Current state (Day 1 — end of Block 4)
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -24,7 +24,7 @@ Legend:
 ┌────────────────────────────────────────────────────────────────────────┐
 │  ✅ perception/camera.py — CameraCapture                                │
 │                                                                         │
-│   Background thread reads cv2.VideoCapture(0) at 30 FPS / 1080p.        │
+│   Background thread reads cv2.VideoCapture(0) at 30 FPS / 720p.         │
 │   Publishes two separate streams from the same hardware read:           │
 │                                                                         │
 │     (a) latest_frame()         → full-res BGR ndarray, live             │
@@ -86,15 +86,30 @@ Legend:
 │                                                                         │
 │   Logic lives here (NOT in YOLO):                                       │
 │     • keypoint geometry → pose class (knee/hip/shoulder angles)         │
-│     • bbox center ∈ zone polygon → zone_transition                      │
+│     • zone_for_entity(entity) diffs across frames → zone_transition     │
 │     • track_id first seen / last seen → new_person, lost_person         │
 └────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│  🟡 perception/zone_map.py — (Block 4, Day 1)                           │
-│     Will load zones.json (pixel polygons) and answer "is (x,y) in       │
-│     zone Z?" for event_detector.                                        │
+│  ✅ perception/zone_map.py — Block 4                                    │
+│                                                                         │
+│   Reads config.ZONES (polygon dict, pixel vertices) lazily on first     │
+│   query and caches each zone as an int32 (N, 1, 2) array for            │
+│   cv2.pointPolygonTest. Exposes:                                        │
+│                                                                         │
+│     zones_for_point(x, y)   -> list[str]                                │
+│     zone_for_entity(entity) -> list[str]                                │
+│     reload_zones()          -> None   (invalidate cache after edits)    │
+│                                                                         │
+│   zone_for_entity picks the query point per-entity:                     │
+│     person + both ankle kps >= ANKLE_CONF_MIN (0.5) → ankle midpoint    │
+│     person + occluded ankles                       → bbox bottom-center │
+│     non-person                                     → bbox center        │
+│                                                                         │
+│   Ships its own click-to-define CLI (python -m perception.zone_map)     │
+│   for populating config.ZONES against the live camera. Walkthrough      │
+│   in SETUP.md §4c.                                                      │
 ├────────────────────────────────────────────────────────────────────────┤
 │  🟡 perception/audio.py — (Block 6, Day 1)                              │
 │     sounddevice mic capture + dB meter + YAMNet 521-class tagging.     │
@@ -125,6 +140,30 @@ Legend:
 - Thread-safe; consumer never blocks on inference.
 - Emits **every** processed frame (no filtering — event_detector decides what counts as an event).
 
+### zone_map
+- `zones_for_point(x, y) -> list[str]` — every zone whose polygon contains `(x, y)`, or `[]`.
+- `zone_for_entity(entity: YoloEntity) -> list[str]` — entity-aware query point (ankle midpoint → bbox-bottom fallback → bbox center for non-persons).
+- `reload_zones() -> None` — force re-read of `config.ZONES` on next query.
+- Reads `config.ZONES` (polygon dict). Cache is thread-safe; read-only after load.
+
+---
+
+## Zone-map assumptions (load-bearing for accuracy)
+
+The zone system relies on a **ground-plane projection**: a single camera
+can only give us 3D position if we assume the queried pixel is on the
+floor. That's true for a person's feet, so zones are drawn on the
+*floor*, not on objects, and queries use a foot-point (ankle midpoint,
+falling back to bbox-bottom when ankles are occluded). Multi-zone
+membership is intentional — a point between desk and door legitimately
+belongs to both, and downstream code decides what to do with it.
+
+These assumptions hold only under specific camera placement (≥1.8 m
+high, tilted ~20° downward, facing across the room). See `SETUP.md` §4b
+for the full checklist. **If the camera moves, zones drift and must be
+re-captured** via `python -m perception.zone_map` (walkthrough in
+`SETUP.md` §4c).
+
 ---
 
 ## Runtime threads (currently)
@@ -146,5 +185,7 @@ Add to this file when any of the following change:
 - A module's output shape changes (update the dataclass block).
 - A thread is added or removed.
 - A new data flow arrow between modules is introduced.
+- Camera-placement assumptions change (height, tilt, mount). Update
+  `SETUP.md` §4b and re-run `python -m perception.zone_map`.
 
 Don't let this doc drift. If you edit a module and don't edit this file, the next session will have to reverse-engineer what you did.
