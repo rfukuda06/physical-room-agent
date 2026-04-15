@@ -33,13 +33,38 @@ FAN_PLUG_IP_HINT = "172.20.10.3"
 CAMERA_INDEX = 0
 AUDIO_DEVICE_INDEX = 0  # MacBook Air Microphone
 
+# -- Camera capture vs. buffer rates --
+# We capture live at full res/fps so YOLO's tracker gets crisp input,
+# but store a downsampled copy in the ring buffer (much cheaper RAM-wise,
+# and Gemini/Claude downsample internally anyway).
+CAMERA_CAPTURE_WIDTH = 1920
+CAMERA_CAPTURE_HEIGHT = 1080
+CAMERA_CAPTURE_FPS = 30
+
+BUFFER_FRAME_WIDTH = 1280
+BUFFER_FRAME_HEIGHT = 720
+BUFFER_FPS = 10  # every 3rd capture frame goes into the buffer
+
 # -- Perception thresholds --
-FRAME_BUFFER_SECONDS = 30
+FRAME_BUFFER_SECONDS = 10
 AUDIO_SAMPLE_RATE = 16000  # YAMNet expects 16 kHz
 AUDIO_WINDOW_SECONDS = 1.0
 YAMNET_CLASSIFY_INTERVAL_SECONDS = 0.5
 YAMNET_MIN_CONFIDENCE = 0.3
 YAMNET_PERSISTENCE_WINDOWS = 2  # class must persist N windows to report
+
+# -- YOLO engine --
+# yolo26n-pose handles person detection + 17-keypoint pose in one forward pass.
+# Chosen over yolo11n-pose because on CPU/MPS (no NVIDIA GPU here) it is ~30%
+# faster AND slightly more accurate, with an improved pose head (RLE) that
+# stabilizes keypoints under occlusion (e.g. sitting behind a desk).
+YOLO_MODEL = "yolo26n-pose.pt"
+YOLO_IMGSZ = 640            # inference resolution the model was trained for
+YOLO_CONF = 0.35            # min detection confidence to keep a box
+YOLO_IOU = 0.5              # NMS IoU threshold (ignored by e2e head; set for safety)
+YOLO_TRACKER = "botsort.yaml"   # Ultralytics' shipped BoT-SORT config
+YOLO_DEVICE = "mps"         # Apple Silicon GPU; falls back to "cpu" automatically
+YOLO_INFER_EVERY_N_FRAMES = 1   # bump to 2 if CPU is saturated
 
 # -- Baselines / calibration --
 CALIBRATION_SECONDS = 300  # 5 min

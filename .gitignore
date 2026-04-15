@@ -3,3 +3,6 @@ venv/
 __pycache__/
 *.pyc
 .DS_Store
+# YOLO weights — auto-downloaded at runtime
+*.pt
+_debug_frames/
