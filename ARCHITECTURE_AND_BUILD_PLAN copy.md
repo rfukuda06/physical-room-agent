@@ -30,6 +30,33 @@ A continuously running Physical Agent that perceives your physical space in real
 
 This directly mirrors Archetype AI's stated architecture: Newton (continuous multi-modal perception) + Physical Agents (on-demand reasoning and action). The MVP demonstrates understanding of the platform thesis, not just one vertical.
 
+### 1.1 Product purpose (the one-sentence thesis)
+
+This project is not a smart-home gadget and not a bag of features. It is the **smallest possible working instance of physical AI** — a single agent that senses a physical space with multiple modalities, reasons about what's happening in human terms, and acts back on the space. The room is a scaled-down factory; the lamp is a scaled-down actuator. The same "sense → fuse → reason → act" loop that runs Archetype's industrial systems, pointed at a room.
+
+**One-sentence pitch:**
+> Newton-for-a-Room is a physical AI agent that continuously watches a space and helps it serve the people in it — it senses presence, activity, sound, and power; reasons about what's happening in plain English; and adjusts the environment accordingly. It's the room-scale version of the industrial systems Archetype builds.
+
+**Shorter:** *A room that pays attention and responds.*
+
+### 1.2 What the product narrates (the feature set, organized around the thesis)
+
+Every capability is an instance of the same loop exercised on a different signal. These are not separate features — they are the same primitive proving it generalizes.
+
+1. **Presence awareness** — who's in the room, when they arrived, when they left, how long the room has been empty. *(Driven by YOLO person tracking + zone transitions.)*
+2. **Activity awareness** — what the person is doing in human terms: working, taking a break, on a call, heading out. *(Driven by Gemini's VLM interpretation of frames, with pose + zone as structured context. Object identification — laptop, phone, cup — happens here inside Gemini, not at Layer 0.)*
+3. **Environmental awareness** — sound events and power-draw anomalies against the learned baseline. Phone ringing, door opening, unexplained noise while the room is empty, fan drawing more power than usual. *(Driven by YAMNet + Kasa plug telemetry.)*
+4. **Action narration** — the agent explains *why* it's doing something, not just what. "Turning the lamp off because you've been out of the room for a minute." Narration is the **trust interface**, not decoration — without it the system looks like a motion-sensor light.
+5. **Memory / summary** — the agent as a stateful system-of-record. "While you were gone, one person came by around 2:15 and left 3 minutes later. Nothing unusual." This is what distinguishes a reasoning agent from reactive rules.
+
+### 1.3 The filter (what stays in, what gets cut)
+
+Every future feature or scope decision is tested against one question:
+
+> **Does this make the room better at perceiving, reasoning about, and responding to what's happening in it?**
+
+If yes → build it. If it's clever but doesn't feed the loop → drop it.
+
 ---
 
 ## 2. System Architecture
