@@ -9,7 +9,7 @@ Legend:
 
 ---
 
-## Current state (Day 1 — end of Block 6)
+## Current state (Day 1 — end of Block 8)
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -153,9 +153,37 @@ Legend:
                                     ▼
                            [ orchestrator merges with YOLO events ]
                                     │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│  ✅ main.py — Orchestrator (Block 8)                                    │
+│                                                                         │
+│   Wires all Layer 0 components into a single monitoring loop:           │
+│     1. Starts CameraCapture (background thread)                         │
+│     2. Starts YoloEngine (background thread)                            │
+│     3. Starts AudioMonitor (PortAudio callback + classify thread)       │
+│     4. Creates EventDetector (synchronous, pulled each tick)            │
+│     5. Main loop:                                                       │
+│        - detector.tick(engine.latest_result()) → YOLO events            │
+│        - audio.tick()                          → audio events           │
+│        - merge → print to console + render on video overlay             │
+│                                                                         │
+│   Video window shows: YOLO boxes/skeleton + zone polygons + rolling     │
+│   event log (top-left) + track status (bottom-left) + audio state       │
+│   (bottom-right). Console prints one line per event + status every 2s.  │
+│                                                                         │
+│   Graceful shutdown on Ctrl+C or 'q' keypress. Prints event summary.   │
+│                                                                         │
+│   NOT YET WIRED (future blocks):                                       │
+│     - Smart plugs (Block 7)                                             │
+│     - Calibration / baselines (Day 2 Block 2)                           │
+│     - Observer / Reasoner (Day 2 Blocks 3-4)                            │
+│     - TTS actuator (Day 2 Block 5)                                      │
+│     - Decision logic (Day 2 Block 6)                                    │
+│     - FastAPI server (Day 3)                                            │
+└────────────────────────────────────────────────────────────────────────┘
+                                    │
 ├────────────────────────────────────────────────────────────────────────┤
-├────────────────────────────────────────────────────────────────────────┤
-│  🟡 perception/plugs.py — (Block 7, Day 1)                              │
+│  🟡 perception/plugs.py — (Block 7, Day 1 — deferred)                   │
 │     python-kasa discovery + power reads + on/off control.               │
 ├────────────────────────────────────────────────────────────────────────┤
 │  🟡 agents/*.py — (Day 2) observer, reasoner, world_state, routing,     │
@@ -209,9 +237,10 @@ Per-type payload:
 | `pose_change`     | `from_pose`, `to_pose`                               |
 | `zone_transition` | `from_zones`, `to_zones`                             |
 
-Pose states: one of `standing | sitting | walking | down | unknown`.
+Pose states: one of `standing | sitting | walking | unknown`.
 `unknown` is never emitted as an event value; it's an internal "hold
-last pose" signal when keypoints are too unreliable to classify.
+last pose" signal when keypoints are too unreliable or geometry is
+ambiguous (e.g. flat torso, bbox wider than tall).
 
 **Identity assumption (load-bearing):** track IDs are per-lifetime only.
 When a person walks fully out and returns, BoT-SORT gives them a *new*
@@ -313,10 +342,11 @@ re-captured** via `python -m perception.zone_map` (walkthrough in
 
 ---
 
-## Runtime threads (currently)
+## Runtime threads (currently — Block 8)
 
 ```
-┌── MainThread ──────────── orchestrator loop: tick() both detectors, render
+┌── MainThread ──────────── main.py loop: tick() both detectors, merge events,
+│                            render cv2 overlay, print to console
 ├── camera-capture ──────── cv2.VideoCapture.read() → _latest_frame, buffer
 ├── yolo-engine ─────────── pulls latest_frame, runs model.track, publishes
 ├── [PortAudio callback] ── sounddevice-managed: appends audio chunks, dB

@@ -31,7 +31,7 @@ FAN_PLUG_IP_HINT = "172.20.10.3"
 
 # -- Camera / audio --
 CAMERA_INDEX = 0
-AUDIO_DEVICE_INDEX = 1  # MacBook Air Microphone (device 0 = iPhone when connected)
+AUDIO_DEVICE_INDEX = 1  # MacBook Air Microphone
 
 # -- Camera capture vs. buffer rates --
 # We capture live at full res/fps so YOLO's tracker gets crisp input,
@@ -51,11 +51,11 @@ AUDIO_SAMPLE_RATE = 16000  # YAMNet expects 16 kHz
 AUDIO_WINDOW_SECONDS = 1.0
 YAMNET_CLASSIFY_INTERVAL_SECONDS = 0.5
 YAMNET_MIN_CONFIDENCE = 0.3
-YAMNET_PERSISTENCE_WINDOWS = 2  # class must persist N windows to report
+YAMNET_PERSISTENCE_WINDOWS = 1  # class must persist N windows to report
 
 # -- Audio spike detection --
-AUDIO_SPIKE_DB_THRESHOLD = 15.0     # dB above rolling mean to trigger audio_spike
-AUDIO_SPIKE_COOLDOWN_SECONDS = 3.0  # suppress re-fire for this long after a spike
+AUDIO_SPIKE_DB_THRESHOLD = 25.0     # dB above rolling mean to trigger audio_spike
+AUDIO_SPIKE_COOLDOWN_SECONDS = 1.5  # suppress re-fire for this long after a spike
 AUDIO_DB_ROLLING_WINDOW_SECONDS = 30  # seconds of dB history for rolling baseline
 
 # -- YOLO engine --
@@ -115,9 +115,10 @@ CALIBRATION_SECONDS = 300  # 5 min
 #     python -m perception.zone_map
 # It prints a ready-to-paste ZONES block. See SETUP.md §4c for the walkthrough.
 ZONES: dict[str, list[tuple[int, int]]] = {
-    "door": [(359, 476), (470, 630), (715, 549), (552, 424)],
-    "gracedesk": [(87, 714), (355, 674), (257, 496), (23, 531)],
-    "renzodesk": [(718, 557), (478, 632), (543, 715), (914, 708)],
+    "door": [(1052, 419), (953, 454), (1063, 541), (1220, 514), (1236, 494), (1087, 414)],
+    "desks": [(624, 713), (491, 492), (271, 511), (291, 714)],
+    "bed": [(165, 342), (177, 471), (688, 506), (613, 391)],
+    "closet": [(737, 381), (822, 494), (1062, 439), (1030, 387)],
 }
 
 # -- LLM toggles (useful during dev) --

@@ -274,6 +274,7 @@ class AudioMonitor:
 
         # --- dB tracking (written by callback, read by classify thread) ---
         self._current_db: float = -100.0
+        self._peak_db_since_classify: float = -100.0
         self._db_history: deque[tuple[float, float]] = deque()
         self._db_lock = threading.Lock()
 
@@ -422,6 +423,7 @@ class AudioMonitor:
         ts = time.monotonic()
         with self._db_lock:
             self._current_db = db
+            self._peak_db_since_classify = max(self._peak_db_since_classify, db)
             self._db_history.append((ts, db))
             cutoff = ts - self._db_rolling_window
             while self._db_history and self._db_history[0][0] < cutoff:
@@ -470,6 +472,8 @@ class AudioMonitor:
 
         with self._db_lock:
             current_db = self._current_db
+            peak_db = self._peak_db_since_classify
+            self._peak_db_since_classify = -100.0  # reset for next cycle
 
         # --- Temporal smoothing + event emission ---
         #
@@ -523,9 +527,9 @@ class AudioMonitor:
                     ))
 
         # --- Speech transitions ---
-        # Longer off-threshold: 4 windows (2s) to ride through natural
+        # Longer off-threshold: 3 windows (1.5s) to ride through natural
         # pauses between sentences without flipping speech_end/speech_start.
-        _SPEECH_OFF_WINDOWS = 4
+        _SPEECH_OFF_WINDOWS = 3
 
         speech_reported = bool(self._reported_classes & self._valid_speech)
 
@@ -570,7 +574,7 @@ class AudioMonitor:
             else:
                 mean_db = current_db
 
-        delta = current_db - mean_db
+        delta = peak_db - mean_db
         if (
             n_readings > 10
             and delta >= self._spike_db_threshold
@@ -584,7 +588,7 @@ class AudioMonitor:
                 zones=[],
                 confidence=1.0,
                 payload={
-                    "current_db": round(current_db, 1),
+                    "current_db": round(peak_db, 1),
                     "baseline_db": round(mean_db, 1),
                     "delta_db": round(delta, 1),
                 },

@@ -556,8 +556,8 @@ The blocks below are in the order we *expect* to tackle things — perception fi
 | 4 | Zone map: define room zones (desk, door, couch, etc.) by pixel regions | 0.5 |
 | 5 | Event detector: consume YOLO output, emit structured events (new_person, lost_person, pose_change, zone_transition, object_moved) | 1.5 |
 | 6 | ✅ Audio streaming with sounddevice + dB monitoring + spike detection + YAMNet classification on rolling 1s windows + whitelist filter + temporal smoothing. Also added speech transition events (speech_start / speech_end) that fire on silence↔speech transitions only, not on steady state — mirrors EventDetector's pose_change pattern. | 1.5 |
-| 7 | Smart plug integration: power reading from both plugs, basic on/off control | 0.5 |
-| 8 | Smoke test: all Layer 0 signals flowing, events printing to console | 0.5 |
+| 7 | 🟡 **Deferred** — Smart plug integration: power reading from both plugs, basic on/off control. Skipped for now; will wire in when hardware is ready. | 0.5 |
+| 8 | ✅ Smoke test: `main.py` orchestrator wires camera + YOLO + audio into a single loop. Events from both EventDetector and AudioMonitor merge into one stream, print to console, and render on a unified cv2 overlay (zones, event log, track status, audio dB/class). Graceful Ctrl+C/q shutdown with session summary. | 0.5 |
 
 **End-of-Day-1 checkpoint:** YOLO is running on your webcam with tracking IDs and pose estimation visible. Audio levels are streaming. Smart plugs respond to commands. Structured events are firing when you move, stand up, or leave frame. Everything prints to console. No Gemini/narration yet.
 

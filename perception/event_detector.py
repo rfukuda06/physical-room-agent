@@ -85,7 +85,7 @@ EVENT_TYPES: tuple[str, ...] = (
 )
 
 # Valid values for a track's pose state. Keep in sync with `_classify_pose`.
-POSE_STATES: tuple[str, ...] = ("standing", "sitting", "walking", "down", "unknown")
+POSE_STATES: tuple[str, ...] = ("standing", "sitting", "walking", "unknown")
 
 
 @dataclass
@@ -192,14 +192,11 @@ def _classify_pose(
 ) -> str:
     """Return one of POSE_STATES for this frame.
 
-    Order matters: we check `down` first (most distinctive geometry),
+    Order matters: we check for ambiguous geometry first (return unknown),
     then sitting vs standing, then promote standing -> walking if the
     center moved enough laterally since the previous frame.
 
     Heuristics:
-      * `down`     — torso is roughly horizontal: |hip_y − shoulder_y|
-                     is small relative to bbox width. Also catches a
-                     bbox that's wider than tall (lying on the floor).
       * `sitting`  — thighs roughly horizontal: |knee_y − hip_y| is small
                      compared to torso length (|hip_y − shoulder_y|). Or
                      bbox aspect says short-and-wide when keypoints are
@@ -207,8 +204,9 @@ def _classify_pose(
       * `standing` — default upright pose; hip-to-knee span is a real
                      fraction of the torso.
       * `walking`  — `standing` + lateral center motion >= threshold.
-      * `unknown`  — not enough signal (no keypoints AND degenerate bbox).
-                     Callers hold the last known pose rather than flip.
+      * `unknown`  — not enough signal, or ambiguous geometry (flat torso,
+                     bbox wider than tall). Callers hold the last known
+                     pose rather than flip.
     """
     cx, _, w, h = entity.bbox_xywh
 
@@ -222,11 +220,11 @@ def _classify_pose(
     raw: str
     if shoulder_y is not None and hip_y is not None:
         torso_len = abs(hip_y - shoulder_y)
-        # `down` check first: if the torso isn't meaningfully vertical
-        # (or the bbox is flatter than it is tall), the person is lying
-        # or slumped. Bbox width is a natural scale for "small".
+        # If the torso isn't meaningfully vertical (or the bbox is
+        # flatter than it is tall), the geometry is ambiguous — treat
+        # as unknown so we hold the last confirmed pose.
         if torso_len < w * 0.35 or w > h * 1.1:
-            raw = "down"
+            return "unknown"
         elif knee_y is not None:
             thigh_len = abs(knee_y - hip_y)
             # When sitting upright, knees are roughly level with hips
@@ -242,7 +240,7 @@ def _classify_pose(
     elif w > 0 and h > 0:
         # No torso keypoints at all — use bbox aspect only.
         if w > h * 1.1:
-            raw = "down"
+            return "unknown"
         elif h < w * 1.8:
             raw = "sitting"
         else:

@@ -6,6 +6,20 @@ Tags: `[decision]` `[mistake]` `[aha]` `[tradeoff]` `[gotcha]`
 
 ---
 
+## 2026-04-15 — Hardware (iPhone as camera/audio source)
+
+### `[decision]` Tried iPhone via Continuity Camera — reverted to MacBook
+
+**What we tried:** Use the iPhone as both the camera and microphone source via macOS Continuity Camera. Motivation: easier to mount the iPhone high in the room for a better overhead angle, and frees up the MacBook for normal use.
+
+**What actually happened:** The audio connection worked fine (iPhone mic shows up as a sounddevice input). The camera connected but was locked into a zoomed-in field of view — Continuity Camera's Center Stage auto-framing crops and zooms to keep people centered, making the frame too tight for whole-room monitoring. Turning Center Stage off didn't fully resolve the lens/zoom behavior.
+
+**Decision:** Reverted `CAMERA_INDEX` back to `0` (MacBook built-in) and `AUDIO_DEVICE_INDEX` back to `1` (MacBook mic). iPhone camera unusable for this use case until the zoom/framing issue is resolved.
+
+**Lesson:** Continuity Camera is designed for video calls (face framing), not room monitoring (wide fixed shot). If iPhone camera is needed in the future, investigate disabling all video effects (Center Stage, Studio Light, Portrait) or using a third-party app like Camo that exposes raw camera output without Apple's auto-framing.
+
+---
+
 ## 2026-04-15 — Day 1, Block 6 (audio perception)
 
 ### `[aha]` YAMNet is a hint engine, not a ground-truth classifier
