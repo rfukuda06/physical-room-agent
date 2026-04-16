@@ -6,15 +6,70 @@ Tags: `[decision]` `[mistake]` `[aha]` `[tradeoff]` `[gotcha]`
 
 ---
 
+## 2026-04-15 — Day 1, Block 5 (event detector)
+
+### `[gotcha]` BoT-SORT track IDs are per-lifetime, not per-identity
+
+**First instinct:** treat `track_id` as a stable handle for "this
+person", so `lost_person` → `new_person` with the same id means "they
+came back".
+
+**Why that's wrong:** BoT-SORT does a short-window re-association
+(appearance + motion) across occlusion, but it cannot re-identify
+someone who walked fully out of frame and returned 10 seconds later.
+The tracker just assigns a fresh id. So a human who steps out and
+comes back gets two separate lifecycles: `lost_person(id=7)`, then
+later `new_person(id=12)`, with nothing connecting them in the stream.
+
+**What we did:** made this explicit in the event_detector docstring
+and DESIGN.md — Layer 0 does NOT do identity re-association. If
+anything wants "same person returned" semantics, it must reason from
+context (time gap, zone, appearance) at a higher layer. The Observer
+prompt will account for this later; for now we just don't pretend
+track_id means more than it does.
+
+**Lesson:** tracker IDs answer "is this the same detection as last
+frame?", not "is this the same physical object as last week?". Don't
+let naming convenience blur that.
+
+---
+
+### `[aha]` Hysteresis is the difference between a useful event and a firehose
+
+**First draft of the detector:** "emit `pose_change` whenever the
+classifier's output differs from last frame's." Ran the synthetic
+test; got ~6 pose_change events in 200 synthetic "sitting" frames
+because the classifier occasionally dipped to "unknown" (low keypoint
+confidence) and bounced back.
+
+**Fix:** three pieces of hysteresis, all keyed off *consecutive* frame
+counts in per-track state:
+- Pose transition needs `EVENT_POSE_HYSTERESIS_FRAMES` (5) of
+  consistent new classification before flipping.
+- Zone transition needs `EVENT_ZONE_DWELL_FRAMES` (5) of consistent
+  zone membership — stops "driving by" a zone boundary from counting.
+- `unknown` pose doesn't count toward a streak; it holds the previous
+  confirmed state. Bad frames shouldn't vote.
+- Lost-person has its own grace window (`LOST_PERSON_GRACE_FRAMES`,
+  30 ≈ 1s) so brief tracker hiccups under occlusion don't turn into
+  spurious lost/new pairs within a single physical presence.
+
+**Lesson:** any state machine whose inputs are noisy should count
+consecutive supporting observations, not just current-vs-last. Cost:
+four small counters per track. Benefit: the event stream is actually
+usable by the Observer without a flood filter on top.
+
+---
+
 ## 2026-04-15 — Day 2, Block 0 (video resolution audit)
 
-### `[decision]` Dropped capture resolution from 1080p to 720p
+### `[mistake]` Dropped capture resolution from 1080p to 720p
 
 **Initial config:** `CAMERA_CAPTURE_WIDTH/HEIGHT = 1920×1080`. The justification in the comment was "so YOLO's tracker gets crisp input."
 
 **Why that's wrong:** YOLO immediately resizes every frame to 640×640 before inference — it doesn't matter if you hand it 1080p or 720p, it sees the same 640×640 either way. Gemini and Claude receive frames from the ring buffer, which was already downsampled to 1280×720. The dashboard stream target was also 720p. So 1080p capture was paying real USB bandwidth and memory cost with zero benefit at any consumer.
 
-**The fix:** Set `CAMERA_CAPTURE_WIDTH/HEIGHT = 1280×720`. Capture and buffer are now the same resolution; the resize step in `_read_loop()` becomes a no-op. Updated `config.py` and `DESIGN.md`.
+**The fix:** Set `CAMERA_CAPTURE_WIDTH/HEIGHT = 1280×720`. Capture and buffer are now the same resolution; the resize step in `_read_loop()` becomes a no-op.
 
 **Lesson:** Trace the data all the way through every consumer before choosing a capture resolution. "Higher is better" only holds if something downstream actually uses the extra pixels.
 
@@ -34,7 +89,7 @@ Tags: `[decision]` `[mistake]` `[aha]` `[tradeoff]` `[gotcha]`
 
 ---
 
-### `[decision]` Ankle-keypoint midpoint, with bbox-bottom fallback
+### `[gotcha]` Ankle-keypoint midpoint, with bbox-bottom fallback
 
 **First call:** just use the bbox bottom-center (`cy + h/2`). Simple, always available.
 
@@ -46,39 +101,9 @@ Tags: `[decision]` `[mistake]` `[aha]` `[tradeoff]` `[gotcha]`
 
 ---
 
-### `[tradeoff]` Rejected automatic zone detection (for now)
-
-Considered using Gemini Flash ("here's a frame, return polygons for desk/door/couch") or Grounded-SAM (text-prompted segmentation) to skip the manual click step entirely.
-
-**Gemini:** free and in-stack, but multimodal LLMs are genuinely bad at precise pixel coordinates — they hallucinate plausible-looking polygons that are off by 50-150px per edge. You'd verify visually anyway.
-
-**Grounded-SAM:** pixel-precise, genuinely automatic, real state-of-the-art. Also a 2-4 hour integration, ~1-2 GB of model weights, and new deps for a 0.5h block.
-
-**And the deeper issue:** "zone" isn't a visual concept — it's a *semantic room subdivision*. A model can find the desk object; it can't know where you want the "desk zone" boundary (just the desk surface? a 1m radius? the whole north wall?). Automatic detection still requires correction, which is the same step the click tool makes you do directly.
-
-**Lesson:** automate when the cost of automation < cost of the manual loop, not reflexively. 2 minutes once per camera move ≥ 2 hours once per project.
-
----
-
-### `[decision]` Consolidated smoke tests under `tests/`
-
-The `_preview_main` functions in `perception/camera.py` and `perception/yolo_engine.py` are really smoke tests — you run them, watch, judge by eye. They lived inside the modules they exercised.
-
-**Moved to:** `tests/smoke_camera.py`, `tests/smoke_yolo.py`, plus a new `tests/smoke_zone_map.py` that overlays zones + foot-points on the YOLO feed. The new files just `import` and call the existing `_preview_main` functions — no duplicate logic, and `python -m perception.camera` still works.
-
-**Why the indirection:** gives a single obvious directory to look in when someone asks "how do I test this locally?", and leaves room for real pytest unit tests (`test_*.py`) alongside the interactive ones once there's non-hardware logic worth pinning (e.g. `world_state` diffing).
-
----
-
-### `[gotcha]` SETUP.md is now load-bearing documentation, not just a session checklist
-
-The zone approach encodes assumptions about the camera (≥1.8m high, tilted down, corner-mounted). If those aren't true, zones silently produce wrong answers — there's no error message. Writing camera-placement guidance into SETUP.md §4b, and the zone-tool walkthrough into §4c, makes those assumptions explicit and checkable. Treating SETUP.md as "just a reminder to activate the venv" would have buried real geometric preconditions in tribal knowledge.
-
----
-
 ## 2026-04-14 — Day 1, Block 3 (YOLO engine)
 
-### `[decision]` Chose YOLO26 over YOLO11 — after initially picking YOLO11
+### `[mistake]` Chose YOLO26 over YOLO11 — after initially picking YOLO11
 
 **First call:** I recommended `yolo11n-pose` because YOLO26 was "too new" and the T4 GPU benchmark showed v26 slightly *slower* (1.5ms vs 1.7ms).
 
@@ -100,19 +125,11 @@ Expected `pip install -U ultralytics` to pull a newer version that knew about YO
 
 ### `[aha]` YOLO-pose only knows one class: `person`
 
-Spent time explaining what YOLO can detect to Renzo. He correctly pushed back: "why does `other=0` in the preview, why isn't it seeing my cup?"
+Spent time explaining what YOLO can detect. Renzo correctly pushed back: "why does `other=0` in the preview, why isn't it seeing my cup?"
 
 Ran a probe on a saved debug frame. YOLO26-pose's class map is literally `{0: 'person'}`. It's trained on the COCO pose dataset, which has one class. The 80-class detector is a *separate* model (`yolo26n.pt`).
 
 **Implication for the architecture:** YOLO provides *continuity and tracking* (who is who, what pose, where in the frame), and Gemini provides *semantic richness* (that's a cup, that's a phone). The split isn't accidental — it's what makes event-driven, affordable perception possible. Gemini on every frame would cost ~$13/hr; YOLO is free continuous triage.
-
----
-
-### `[tradeoff]` Pose classification deferred from Block 3 to Block 5
-
-Considered including sitting/standing/walking classification inside `yolo_engine.py`. Chose to keep Block 3 scoped to raw YOLO output (bboxes, track IDs, raw keypoints) and push pose-class derivation into `event_detector.py`.
-
-**Why:** mixing raw perception and interpretation in one module obscures the layering. Keypoints are machine data; "sitting" is a named event. event_detector is where all named events should be born, for consistency with `zone_transition`, `new_person`, etc.
 
 ---
 
@@ -132,26 +149,6 @@ Leave at 1 unless symptoms show.
 
 ---
 
-### `[decision]` YoloEngine API = background thread + `latest_result()`, not sync
-
-Considered a simpler `run_once(frame) → result` API. Rejected because:
-
-1. Main loop would stall 30–40ms per frame on inference.
-2. Day 2's Observer + Day 3's WebSocket will also want `latest_result()` without blocking.
-3. Mirrors the pattern in `camera.py`, so there's one thread-safety idiom to remember.
-
-Tradeoff: one more thread to debug, but the pattern is already proven by `CameraCapture`.
-
----
-
-### `[aha]` Zones aren't a YOLO concept — they're pixel rectangles in config
-
-Renzo asked "can YOLO even create zones?" Good prompt — I had been blurring "YOLO can do X" with "we can derive X from YOLO output." Zones are defined in `config.ZONES` as pixel tuples; `event_detector` checks bbox centers against them. YOLO just hands us bbox centers.
-
-**Follow-on:** means the camera has to stay still for the whole session. If it moves, pixel zones point at the wrong parts of the room. Added to decision backlog: Block 4 will build an interactive click-to-define zones tool.
-
----
-
 ## Template for new entries
 
 ```
@@ -165,4 +162,3 @@ What actually happened / why the first attempt was wrong.
 
 The lesson or the rule I now follow.
 ```
-

@@ -9,7 +9,7 @@ Legend:
 
 ---
 
-## Current state (Day 1 — end of Block 4)
+## Current state (Day 1 — end of Block 5)
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -78,16 +78,27 @@ Legend:
                                     │  entities are value types)
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│  🟡 perception/event_detector.py — (Block 5, Day 1)                     │
+│  ✅ perception/event_detector.py — Block 5                              │
 │                                                                         │
-│   Will consume YoloResult streams and emit named events:                │
-│     new_person, lost_person, zone_transition, pose_change,              │
-│     entering, leaving, hand_raised, etc.                                │
+│   Stateful transducer: YoloResult per frame → list[Event] per tick.    │
+│   Owns per-track state between calls; all derivations (pose class,     │
+│   zone membership, lifecycle) live here, NOT in YOLO.                  │
 │                                                                         │
-│   Logic lives here (NOT in YOLO):                                       │
-│     • keypoint geometry → pose class (knee/hip/shoulder angles)         │
-│     • zone_for_entity(entity) diffs across frames → zone_transition     │
-│     • track_id first seen / last seen → new_person, lost_person         │
+│   Public API:                                                          │
+│     EventDetector().tick(result) -> list[Event]                        │
+│     detector.active_track_ids() -> list[int]                           │
+│     detector.pose_for(track_id) -> str | None                          │
+│                                                                         │
+│   Noise controls (see config.EVENT_*):                                 │
+│     • POSE_HYSTERESIS_FRAMES — pose must persist N frames to flip      │
+│     • ZONE_DWELL_FRAMES      — zone set must persist N frames to flip  │
+│     • LOST_PERSON_GRACE      — ~1s of absence before lost_person fires │
+│     • WALK_MIN_DX_PX         — center-x delta that promotes            │
+│                                 standing → walking                      │
+│                                                                         │
+│   NOT implemented here (deferred):                                     │
+│     object_moved — non-person tracked class displacement. Demo is      │
+│     person-centric; add when there's a use case that needs it.         │
 └────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -145,6 +156,44 @@ Legend:
 - `zone_for_entity(entity: YoloEntity) -> list[str]` — entity-aware query point (ankle midpoint → bbox-bottom fallback → bbox center for non-persons).
 - `reload_zones() -> None` — force re-read of `config.ZONES` on next query.
 - Reads `config.ZONES` (polygon dict). Cache is thread-safe; read-only after load.
+
+### event_detector
+
+Emits one canonical `Event` dataclass. Every event carries:
+
+```
+type: str               # "new_person" | "lost_person" | "pose_change" | "zone_transition"
+ts: float               # monotonic timestamp from the YoloResult
+track_id: int | None    # BoT-SORT track id
+zones: list[str]        # zones at the moment of the event
+confidence: float       # underlying YOLO detection confidence
+payload: dict           # type-specific extras (see below)
+```
+
+Per-type payload:
+
+| type              | payload keys                                         |
+| ----------------- | ---------------------------------------------------- |
+| `new_person`      | `bbox_xywh`, `initial_pose`                          |
+| `lost_person`     | `last_zones`, `last_bbox_xywh`, `frames_missing`     |
+| `pose_change`     | `from_pose`, `to_pose`                               |
+| `zone_transition` | `from_zones`, `to_zones`                             |
+
+Pose states: one of `standing | sitting | walking | down | unknown`.
+`unknown` is never emitted as an event value; it's an internal "hold
+last pose" signal when keypoints are too unreliable to classify.
+
+**Identity assumption (load-bearing):** track IDs are per-lifetime only.
+When a person walks fully out and returns, BoT-SORT gives them a *new*
+id, so Layer 0 emits `lost_person(id=N)` followed later by
+`new_person(id=M)` for what's physically the same human. Layer 0 does
+not attempt identity re-association; that's a semantic call the
+Observer or Reasoner makes from context. Any downstream code that
+wants "same person re-entered" semantics must join on something other
+than track_id.
+
+Event `type` strings are mirrored in `config.REASONER_ALWAYS` so the
+Reasoner routing policy (`agents/routing.py`) matches them verbatim.
 
 ---
 

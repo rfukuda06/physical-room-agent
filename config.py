@@ -66,6 +66,36 @@ YOLO_TRACKER = "botsort.yaml"   # Ultralytics' shipped BoT-SORT config
 YOLO_DEVICE = "mps"         # Apple Silicon GPU; falls back to "cpu" automatically
 YOLO_INFER_EVERY_N_FRAMES = 1   # bump to 2 if CPU is saturated
 
+# -- Event detector (Day 1 Block 5) --
+# These govern how raw YOLO per-frame output is condensed into discrete events
+# (new_person, lost_person, pose_change, zone_transition). The detector runs
+# on every YoloResult; these thresholds decide what counts as a "real" change
+# vs. frame-to-frame noise. Tuned against a 30 FPS capture pipeline — bump
+# the *_FRAMES constants if you lower YOLO_INFER_EVERY_N_FRAMES.
+#
+# Why each one exists:
+#   * KP_MIN_CONF      — keypoints below this are unreliable; pose classifier
+#                        returns "unknown" and we hold last_pose rather than
+#                        flicker on a bad frame.
+#   * POSE_HYSTERESIS  — sitting/standing/walking must persist N frames before
+#                        we emit pose_change. Cheap hysteresis, prevents one
+#                        bad keypoint frame from firing a spurious transition.
+#   * ZONE_DWELL       — a person stepping briefly across a zone boundary
+#                        shouldn't count; zone must hold for N frames.
+#   * LOST_GRACE       — BoT-SORT occasionally drops a track for 1–2 frames
+#                        mid-stream (occlusion, motion blur). Waiting ~1s
+#                        avoids false lost_person/new_person churn for the
+#                        *same* physical person within one track lifetime.
+#   * WALK_MIN_DX_PX   — center-x displacement per frame above which we call
+#                        a standing person "walking". ~15px at 30 FPS ≈ 0.5
+#                        body-widths/second of lateral motion, which matches
+#                        a normal indoor walking pace for a 1280-wide frame.
+EVENT_POSE_KP_MIN_CONF = 0.5
+EVENT_POSE_HYSTERESIS_FRAMES = 5     # ~0.17s at 30 FPS
+EVENT_ZONE_DWELL_FRAMES = 5          # ~0.17s — ignore drive-by boundary crosses
+EVENT_LOST_PERSON_GRACE_FRAMES = 30  # ~1.0s — tracker occlusion tolerance
+EVENT_WALK_MIN_DX_PX = 15            # per-frame center-x delta threshold
+
 # -- Baselines / calibration --
 CALIBRATION_SECONDS = 300  # 5 min
 
@@ -80,10 +110,9 @@ CALIBRATION_SECONDS = 300  # 5 min
 #     python -m perception.zone_map
 # It prints a ready-to-paste ZONES block. See SETUP.md §4c for the walkthrough.
 ZONES: dict[str, list[tuple[int, int]]] = {
-    
-    # "desk":  [(412, 603), (887, 598), (901, 842), (388, 847)],
-    # "door":  [(1055, 420), (1260, 418), (1258, 880), (1050, 885)],
-    # "couch": [(120, 700), (610, 695), (605, 940), (115, 945)],
+    "door": [(359, 476), (470, 630), (715, 549), (552, 424)],
+    "gracedesk": [(87, 714), (355, 674), (257, 496), (23, 531)],
+    "renzodesk": [(718, 557), (478, 632), (543, 715), (914, 708)],
 }
 
 # -- LLM toggles (useful during dev) --
