@@ -9,14 +9,14 @@ Legend:
 
 ---
 
-## Current state (Day 1 — end of Block 5)
+## Current state (Day 1 — end of Block 6)
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │                        HARDWARE (physical world)                        │
 │                                                                         │
 │   MacBook webcam ──▶ USB pipe ──▶ OpenCV                               │
-│   MacBook mic   ⬜  (not yet consumed)                                 │
+│   MacBook mic ──▶ PortAudio ──▶ sounddevice (device 1)                 │
 │   Kasa plugs    ⬜  (not yet discovered)                               │
 └────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -121,9 +121,39 @@ Legend:
 │   Ships its own click-to-define CLI (python -m perception.zone_map)     │
 │   for populating config.ZONES against the live camera. Walkthrough      │
 │   in SETUP.md §4c.                                                      │
+┌────────────────────────────────────────────────────────────────────────┐
+│  ✅ perception/audio.py — Block 6                                       │
+│                                                                         │
+│   Two concurrent workers: a PortAudio callback (sounddevice-managed)    │
+│   appends 1024-sample chunks to a ring buffer and computes per-chunk    │
+│   RMS dB.  A daemon thread ("audio-classify") wakes every 500 ms,      │
+│   reads the last 1 s of audio, runs YAMNet (521 → 32 whitelisted       │
+│   classes), applies temporal smoothing, and publishes events.           │
+│                                                                         │
+│   Public API:                                                          │
+│     AudioMonitor(device_index, sample_rate, …)                         │
+│       .start() / .stop()                                                │
+│       .tick()          -> list[Event]    # drain pending audio events   │
+│       .latest_state()  -> AudioState     # snapshot for WorldState     │
+│       .stats()         -> dict           # diagnostics                 │
+│                                                                         │
+│   Temporal smoothing: a class must persist ≥ YAMNET_PERSISTENCE_WINDOWS │
+│   (2) consecutive 500 ms windows before reporting.  Speech uses the     │
+│   same threshold for both on and off transitions (symmetric hysteresis).│
+│                                                                         │
+│   dB spike detection: fires when current dB exceeds a 30 s rolling      │
+│   mean by ≥ AUDIO_SPIKE_DB_THRESHOLD (15 dB). 3 s cooldown.            │
+│                                                                         │
+│   AudioClassifier is an ABC — YamNetClassifier is the current impl;    │
+│   swap in CLAP / BEATs / EfficientAT without changing AudioMonitor.    │
+└────────────────────────────────────────────────────────────────────────┘
+                                    │
+              audio_monitor.tick()  │ (list[Event] — same Event dataclass
+                                    │  as event_detector; track_id=None)
+                                    ▼
+                           [ orchestrator merges with YOLO events ]
+                                    │
 ├────────────────────────────────────────────────────────────────────────┤
-│  🟡 perception/audio.py — (Block 6, Day 1)                              │
-│     sounddevice mic capture + dB meter + YAMNet 521-class tagging.     │
 ├────────────────────────────────────────────────────────────────────────┤
 │  🟡 perception/plugs.py — (Block 7, Day 1)                              │
 │     python-kasa discovery + power reads + on/off control.               │
@@ -195,6 +225,74 @@ than track_id.
 Event `type` strings are mirrored in `config.REASONER_ALWAYS` so the
 Reasoner routing policy (`agents/routing.py`) matches them verbatim.
 
+### AudioMonitor
+
+- `tick() -> list[Event]` — drain accumulated audio events since last call.
+- `latest_state() -> AudioState | None` — current audio snapshot.
+- `stats() -> dict` — buffer chunks, dB, classify latency, whitelist count.
+- Thread-safe; events never lost (atomic swap on tick).
+
+Audio events use the same `Event` dataclass as YOLO events, with
+`track_id=None` and `zones=[]` (audio is not spatial or person-specific).
+
+| type                    | payload keys                                  |
+| ----------------------- | --------------------------------------------- |
+| `unusual_sound_class`   | `class_name`, `confidence`, `db_level`        |
+| `audio_spike`           | `current_db`, `baseline_db`, `delta_db`       |
+| `speech_start`          | `confidence`, `db_level`                      |
+| `speech_end`            | `duration_seconds`                            |
+
+Speech events fire on *transitions only* — silence→speech emits
+`speech_start`, speech→silence emits `speech_end`.  Continuing speech
+is tracked silently via `AudioState.speech_active`.  Both transitions
+use the same `YAMNET_PERSISTENCE_WINDOWS` hysteresis threshold (2
+windows = 1 s) to avoid flickering on brief pauses.
+
+`AudioState` snapshot:
+
+```
+AudioState
+  ├─ audio_level_db: float         # current RMS dB (0 = full scale)
+  ├─ top_classes: [(name, conf)]   # non-speech, filtered + smoothed
+  ├─ dominant_class: str           # top label or "speech" / "silence"
+  ├─ speech_active: bool           # True while speech is ongoing
+  ├─ recent_spike: bool            # True if spike fired recently
+  ├─ spike_magnitude_db: float     # delta of last spike (0 if none)
+  └─ timestamp: float              # monotonic
+```
+
+`unusual_sound_class` is in `config.REASONER_ALWAYS` — the Reasoner
+always fires on novel non-speech sounds (door, glass, alarm, etc.).
+
+**YAMNet limitations (load-bearing for Observer/Reasoner prompt design):**
+
+YAMNet was trained on YouTube audio clips, not real-time room recordings
+from a laptop microphone.  In practice its reliable signals are:
+
+1. **dB spike** — the most trustworthy audio signal.  Pure loudness
+   detection, no classification needed.
+2. **Speech detection** — high confidence, works well.
+3. **A handful of loud/distinctive sounds** — knocking, music, alarms
+   when close to the mic.
+
+For the majority of the 30 whitelisted classes (coughing, footsteps,
+glass breaking, door opening, etc.) YAMNet is **unreliable from a
+laptop mic at room distance**.  Quiet or brief sounds often don't
+register at all.
+
+**Rules for the Observer and Reasoner:**
+
+- **Do not over-trust** `unusual_sound_class` — treat it as a hint,
+  not ground truth.  Use the camera frame to confirm.
+- **Do not assume nothing happened** because YAMNet didn't classify a
+  sound.  Absence of a classification does NOT mean absence of the
+  event — the model simply may not have picked it up.
+- **Audio spikes fire on ambient noise too** (chair scrape, AC
+  cycling, random bumps).  If the Observer can't determine what caused
+  a spike from the camera frame, it should say so honestly rather than
+  hallucinate an explanation.  "I heard a loud sound but couldn't
+  identify what caused it" is a valid observation.
+
 ---
 
 ## Zone-map assumptions (load-bearing for accuracy)
@@ -218,9 +316,11 @@ re-captured** via `python -m perception.zone_map` (walkthrough in
 ## Runtime threads (currently)
 
 ```
-┌── MainThread ────────── interactive preview loop (cv2.imshow, keys)
-├── camera-capture ────── cv2.VideoCapture.read() → _latest_frame, buffer
-└── yolo-engine ────────── pulls latest_frame, runs model.track, publishes
+┌── MainThread ──────────── orchestrator loop: tick() both detectors, render
+├── camera-capture ──────── cv2.VideoCapture.read() → _latest_frame, buffer
+├── yolo-engine ─────────── pulls latest_frame, runs model.track, publishes
+├── [PortAudio callback] ── sounddevice-managed: appends audio chunks, dB
+└── audio-classify ──────── YAMNet every 500ms → smoothing → events
 ```
 
 No IPC, no queues, no async — just shared state behind locks. Keep it this way until we *need* something more.

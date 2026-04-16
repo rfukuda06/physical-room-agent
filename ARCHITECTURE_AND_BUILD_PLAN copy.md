@@ -555,7 +555,7 @@ The blocks below are in the order we *expect* to tackle things — perception fi
 | 3 | YOLO engine: detection + tracking + pose estimation running on webcam feed | 2.0 |
 | 4 | Zone map: define room zones (desk, door, couch, etc.) by pixel regions | 0.5 |
 | 5 | Event detector: consume YOLO output, emit structured events (new_person, lost_person, pose_change, zone_transition, object_moved) | 1.5 |
-| 6 | Audio streaming with sounddevice + dB monitoring + spike detection + YAMNet classification on rolling 1s windows + whitelist filter + temporal smoothing | 1.5 |
+| 6 | ✅ Audio streaming with sounddevice + dB monitoring + spike detection + YAMNet classification on rolling 1s windows + whitelist filter + temporal smoothing. Also added speech transition events (speech_start / speech_end) that fire on silence↔speech transitions only, not on steady state — mirrors EventDetector's pose_change pattern. | 1.5 |
 | 7 | Smart plug integration: power reading from both plugs, basic on/off control | 0.5 |
 | 8 | Smoke test: all Layer 0 signals flowing, events printing to console | 0.5 |
 

@@ -31,7 +31,7 @@ FAN_PLUG_IP_HINT = "172.20.10.3"
 
 # -- Camera / audio --
 CAMERA_INDEX = 0
-AUDIO_DEVICE_INDEX = 0  # MacBook Air Microphone
+AUDIO_DEVICE_INDEX = 1  # MacBook Air Microphone (device 0 = iPhone when connected)
 
 # -- Camera capture vs. buffer rates --
 # We capture live at full res/fps so YOLO's tracker gets crisp input,
@@ -52,6 +52,11 @@ AUDIO_WINDOW_SECONDS = 1.0
 YAMNET_CLASSIFY_INTERVAL_SECONDS = 0.5
 YAMNET_MIN_CONFIDENCE = 0.3
 YAMNET_PERSISTENCE_WINDOWS = 2  # class must persist N windows to report
+
+# -- Audio spike detection --
+AUDIO_SPIKE_DB_THRESHOLD = 15.0     # dB above rolling mean to trigger audio_spike
+AUDIO_SPIKE_COOLDOWN_SECONDS = 3.0  # suppress re-fire for this long after a spike
+AUDIO_DB_ROLLING_WINDOW_SECONDS = 30  # seconds of dB history for rolling baseline
 
 # -- YOLO engine --
 # yolo26n-pose handles person detection + 17-keypoint pose in one forward pass.

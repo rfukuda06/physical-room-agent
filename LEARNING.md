@@ -6,6 +6,67 @@ Tags: `[decision]` `[mistake]` `[aha]` `[tradeoff]` `[gotcha]`
 
 ---
 
+## 2026-04-15 — Day 1, Block 6 (audio perception)
+
+### `[aha]` YAMNet is a hint engine, not a ground-truth classifier
+
+**What I expected:** YAMNet would reliably classify most of the 30
+whitelisted room sounds — coughing, footsteps, door opening, glass
+breaking, clapping, etc.  The Observer would use these classifications
+as solid evidence.
+
+**What actually happened:** YAMNet was trained on YouTube audio, not
+real-time laptop-mic recordings at room distance.  In testing, it
+reliably detected speech and a few loud/distinctive sounds (knocking
+when close to mic), but **missed the majority of the 30 classes**.
+Quiet sounds (cough, footsteps, breathing) never registered.  Brief
+transients (claps) got averaged away in the 1-second window.  The dB
+spike detector, which is pure loudness with no classification, was far
+more reliable for detecting that *something* happened.
+
+Also: audio spikes fire on mundane ambient noise (chair scraping, AC
+cycling) — not just notable events.  If the Observer is told "audio
+spike occurred" and forced to explain it, it will hallucinate.
+
+**Lesson — three rules for Observer/Reasoner prompt design:**
+1. Treat `unusual_sound_class` as a weak hint, not fact.  Confirm
+   with the camera frame.
+2. Never assume something didn't happen because YAMNet didn't report
+   it.  Absence of classification ≠ absence of event.
+3. If a spike fires and the camera shows nothing interesting, say "I
+   heard something but can't tell what" — don't invent a narrative.
+
+**Practical signal priority:** dB spike > speech transitions >
+classification hints.  Audio's role is to nudge the Observer to look
+at the frame, not to be an authoritative sensor.
+
+---
+
+### `[decision]` Speech as transitions, not raw state
+
+**First plan:** track `speech_active` as a flag in AudioState and emit
+`unusual_sound_class` for speech like any other class.
+
+**Why that's wrong:** speech is the most common sound in a room.
+Emitting an event every time someone talks would flood the Observer
+with routine noise. But ignoring speech entirely loses useful context
+(someone started talking to the room agent, or the room went quiet).
+
+**What we did instead:** treat speech the same way EventDetector treats
+pose — emit events on *transitions* only. `speech_start` fires when
+silence becomes speech; `speech_end` fires when speech becomes silence.
+Continuing speech is tracked silently via `AudioState.speech_active`.
+Both transitions use the same `YAMNET_PERSISTENCE_WINDOWS` hysteresis
+(2 windows = 1 s) to avoid flickering on brief pauses between
+sentences.
+
+**Lesson:** when a signal is *always on* during normal use, the useful
+information is in its edges (on/off transitions), not its level.
+Observer/Reasoner can use `speech_start` as context ("user is talking
+to me") without drowning in "still talking" events every 500 ms.
+
+---
+
 ## 2026-04-15 — Day 1, Block 5 (event detector)
 
 ### `[gotcha]` BoT-SORT track IDs are per-lifetime, not per-identity
