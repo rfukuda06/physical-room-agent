@@ -104,13 +104,16 @@ YOLO_INFER_EVERY_N_FRAMES = 1   # bump to 2 if CPU is saturated
 EVENT_POSE_KP_MIN_CONF = 0.5
 EVENT_POSE_HYSTERESIS_FRAMES = 8     # ~0.27s at 30 FPS
 EVENT_ZONE_DWELL_FRAMES = 5          # ~0.17s — ignore drive-by boundary crosses
+EVENT_NEW_PERSON_CONFIRM_FRAMES = 10 # ~0.33s — track must persist before new_person fires
 EVENT_LOST_PERSON_GRACE_FRAMES = 30  # ~1.0s — tracker occlusion tolerance
 EVENT_WALK_MIN_DIST_PX = 8           # per-frame 2D center-point distance threshold
 EVENT_WALK_HOLD_FRAMES = 15          # ~0.5s — stay "walking" through brief pauses
 EVENT_SIT_HOLD_FRAMES = 5            # ~0.17s — stay "sitting" through brief jitter
 
 # -- Baselines / calibration --
-CALIBRATION_SECONDS = 300  # 5 min
+CALIBRATION_SECONDS = 30               # ~30s gives enough samples (see LEARNING.md)
+CALIBRATION_AMBIENT_CLASS_MIN_RATIO = 0.3   # class must appear in >=30% of windows
+CALIBRATION_EXCLUDE_SPEECH_FROM_FLOOR = True  # skip speech dB from noise floor calc
 
 # -- Zones (pixel polygons in the camera frame) --
 # Each zone is a list of (x, y) vertices in pixel space, in order around the
@@ -131,6 +134,16 @@ ZONES: dict[str, list[tuple[int, int]]] = {
 # -- LLM toggles (useful during dev) --
 OBSERVER_ENABLED = True   # Gemini Flash (Beat 1)
 REASONER_ENABLED = True   # Claude Sonnet (Beat 2) — disable to save cost
+
+# -- Observer (Gemini) settings --
+GEMINI_MODEL = "gemini-2.5-flash"       # swap to "gemini-2.5-flash-lite" for cheaper/faster
+OBSERVER_THINKING_BUDGET = 0            # 0 = disable thinking for low-latency factual descriptions
+OBSERVER_REFRESH_INTERVAL_S = 15        # background refresh during quiet periods
+OBSERVER_DEBOUNCE_S = 0.15             # batch events within this window before calling Gemini
+OBSERVER_TIMEOUT_S = 8.0               # max wait for Gemini response before giving up
+OBSERVER_MAX_FRAMES = 3                # how many frames to send (current + N-1 prior)
+OBSERVER_FRAME_QUALITY = 70            # JPEG quality for frame encoding (lower = smaller = cheaper)
+OBSERVER_FRAME_MAX_DIM = 1280          # raw camera res (1280×720 = 2 tiles = 516 tokens/image)
 
 # -- Reasoner routing policy (hybrid) --
 # Event types in this set always escalate to the Reasoner regardless of what

@@ -40,7 +40,10 @@ from perception.yolo_engine import YoloEngine
 from perception.event_detector import Event, EventDetector
 from perception.audio import AudioMonitor
 from perception.plugs import PlugManager
+from agents.baselines import CalibrationCollector
 from agents.world_state import WorldState
+from agents.observer import Observer, ObserverWorker
+from agents.routing import should_call_reasoner
 
 log = logging.getLogger(__name__)
 
@@ -192,7 +195,8 @@ def main() -> None:
     print(f"  Camera index:       {config.CAMERA_INDEX}")
     print(f"  Audio device:       {config.AUDIO_DEVICE_NAME}")
     print(f"  Zones loaded:       {list(config.ZONES.keys()) or '(none)'}")
-    print(f"  Observer enabled:   {config.OBSERVER_ENABLED}  (not wired yet)")
+    print(f"  Calibration:        {config.CALIBRATION_SECONDS}s")
+    print(f"  Observer enabled:   {config.OBSERVER_ENABLED}  (model={config.GEMINI_MODEL})")
     print(f"  Reasoner enabled:   {config.REASONER_ENABLED}  (not wired yet)")
     print()
     print("  Press 'q' in the video window to quit.")
@@ -278,7 +282,69 @@ def main() -> None:
     world = WorldState()
     log.info("WorldState initialized")
 
-    # -- Step 6b (skipped): Calibration -- Day 2 Block 2
+    # -- Step 6b: Calibration phase --
+    def _calibration_overlay(frame: np.ndarray, elapsed: float, duration: float) -> None:
+        """Draw a progress bar and countdown on the video frame during calibration."""
+        h, w = frame.shape[:2]
+
+        # Semi-transparent bar across the top
+        bar_h = 44
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (w, bar_h), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+
+        remaining = max(0, duration - elapsed)
+        progress = min(1.0, elapsed / duration)
+
+        # Progress bar (orange fill)
+        bar_x0, bar_y0, bar_y1 = 10, 10, 32
+        bar_w = int(progress * (w - 20))
+        cv2.rectangle(frame, (bar_x0, bar_y0), (bar_x0 + bar_w, bar_y1), (0, 160, 255), -1)
+        cv2.rectangle(frame, (bar_x0, bar_y0), (w - 10, bar_y1), (100, 100, 100), 1)
+
+        # Countdown text
+        text = f"Calibrating... {remaining:.0f}s remaining"
+        (tw, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+        cv2.putText(
+            frame, text, ((w - tw) // 2, 26),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA,
+        )
+
+    cal = CalibrationCollector(
+        world=world,
+        engine=engine,
+        detector=detector,
+        audio=audio,
+        plugs=plugs,
+        duration=config.CALIBRATION_SECONDS,
+    )
+    print()
+    print(f"  Calibrating — learning this room ({config.CALIBRATION_SECONDS}s)...")
+    print()
+    baselines = cal.run(overlay_callback=_calibration_overlay)
+    print()
+    print(
+        f"  Baseline established. "
+        f"Audio: {baselines.audio_mean_db:.1f} +/- {baselines.audio_std_db:.1f} dB, "
+        f"Occupancy: {baselines.typical_occupancy}, "
+        f"Lamp: {baselines.power_idle_lamp_w:.1f}W, "
+        f"Fan: {baselines.power_idle_fan_w:.1f}W"
+    )
+    if baselines.ambient_audio_classes:
+        print(f"  Ambient classes: {baselines.ambient_audio_classes}")
+    print()
+
+    # -- Step 6c: Observer agent (Layer 1) --
+    observer = Observer(world=world, camera=camera)
+    observer_worker = ObserverWorker(observer)
+    if config.OBSERVER_ENABLED:
+        observer_worker.start()
+        log.info(
+            "Observer started (model=%s, thinking=%s, refresh=%ds)",
+            config.GEMINI_MODEL,
+            "off" if config.OBSERVER_THINKING_BUDGET == 0 else config.OBSERVER_THINKING_BUDGET,
+            config.OBSERVER_REFRESH_INTERVAL_S,
+        )
 
     # -- Step 7: Main monitoring loop --
     recent_events: list[tuple[float, Event]] = []  # (elapsed_sec, event)
@@ -335,6 +401,62 @@ def main() -> None:
                 world.update_devices(plugs)
             for ev in all_events:
                 world.push_event(ev)
+
+            # --- Feed events to Observer (Layer 1) ---
+            if config.OBSERVER_ENABLED and all_events:
+                serialized_events = []
+                for ev in all_events:
+                    serialized_events.append({
+                        "type": ev.type,
+                        "track_id": ev.track_id,
+                        "zones": list(ev.zones) if ev.zones else [],
+                        "payload": dict(ev.payload) if ev.payload else {},
+                    })
+                observer_worker.push_events(
+                    serialized_events, frame=camera.latest_frame(),
+                )
+
+            # --- Check for Observer results (Beat 1) ---
+            if config.OBSERVER_ENABLED:
+                obs_poll = observer_worker.poll_result()
+                if obs_poll is not None:
+                    obs_result, obs_event_types = obs_poll
+                    narration = obs_result.get("narration", "")
+                    escalate = obs_result.get("escalate", False)
+
+                    # Print Beat 1 narration
+                    print(f"  \033[94m[BEAT 1]\033[0m {narration}")
+
+                    # Append to the recent_events overlay as a special entry
+                    beat1_elapsed = time.monotonic() - t_start
+                    recent_events.append((beat1_elapsed, Event(
+                        type="beat_1",
+                        ts=time.monotonic(),
+                        track_id=None,
+                        zones=[],
+                        confidence=1.0,
+                        payload={"narration": narration[:80]},
+                    )))
+
+                    # Routing: check if Reasoner should fire
+                    # Use the first trigger event type, or "periodic_refresh"
+                    primary_event_type = (
+                        obs_event_types[0] if obs_event_types
+                        else "periodic_refresh"
+                    )
+                    if should_call_reasoner(primary_event_type, obs_result):
+                        log.info(
+                            "Routing → Reasoner (trigger=%s, escalate=%s, "
+                            "reason=%s)",
+                            primary_event_type, escalate,
+                            obs_result.get("escalate_reason", ""),
+                        )
+                        # TODO Block 4: call Reasoner here
+                    else:
+                        log.debug(
+                            "Routing → Beat 1 only (trigger=%s, escalate=%s)",
+                            primary_event_type, escalate,
+                        )
 
             # --- Render video overlay ---
             # Always update last_display_frame when we have a new annotated result,
@@ -393,6 +515,10 @@ def main() -> None:
 
     finally:
         log.info("Shutting down...")
+
+        # Stop Observer worker thread first (it's quick, no hardware)
+        if config.OBSERVER_ENABLED:
+            observer_worker.stop()
 
         # Print summary immediately — doesn't depend on hardware cleanup.
         elapsed_total = time.monotonic() - t_start

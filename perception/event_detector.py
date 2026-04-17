@@ -142,6 +142,9 @@ class _TrackState:
 
     frames_missing: int
 
+    confirmed: bool             # False until track persists NEW_PERSON_CONFIRM_FRAMES
+    frames_seen: int            # how many frames this track has been present
+
 
 # ---------------------------------------------------------------------------
 # Pose classifier
@@ -284,6 +287,7 @@ class EventDetector:
         kp_min_conf: float = config.EVENT_POSE_KP_MIN_CONF,
         pose_hysteresis_frames: int = config.EVENT_POSE_HYSTERESIS_FRAMES,
         zone_dwell_frames: int = config.EVENT_ZONE_DWELL_FRAMES,
+        new_person_confirm_frames: int = config.EVENT_NEW_PERSON_CONFIRM_FRAMES,
         lost_person_grace_frames: int = config.EVENT_LOST_PERSON_GRACE_FRAMES,
         walk_min_dist_px: float = config.EVENT_WALK_MIN_DIST_PX,
         walk_hold_frames: int = config.EVENT_WALK_HOLD_FRAMES,
@@ -294,6 +298,7 @@ class EventDetector:
         self._kp_min_conf = kp_min_conf
         self._pose_hyst = max(1, pose_hysteresis_frames)
         self._zone_dwell = max(1, zone_dwell_frames)
+        self._new_confirm = max(1, new_person_confirm_frames)
         self._lost_grace = max(1, lost_person_grace_frames)
         self._walk_min_dist = walk_min_dist_px
         self._walk_hold = max(1, walk_hold_frames)
@@ -353,9 +358,10 @@ class EventDetector:
 
             state = self._tracks.get(tid)
             if state is None:
-                # Fresh track. Classify its pose from this single frame
-                # (no prior center_x, so "walking" is never an initial
-                # pose — we need motion history for that).
+                # Fresh track — start unconfirmed.  Don't emit new_person
+                # yet; the track must persist for _new_confirm frames first
+                # to filter out phantom YOLO detections (shadows, furniture
+                # that briefly looks person-shaped).
                 initial_pose = _classify_pose(
                     ent, last_center_x=None, last_center_y=None,
                     kp_min_conf=self._kp_min_conf,
@@ -377,18 +383,9 @@ class EventDetector:
                     walk_hold_remaining=0,
                     sit_hold_remaining=0,
                     frames_missing=0,
+                    confirmed=False,
+                    frames_seen=1,
                 )
-                events.append(Event(
-                    type="new_person",
-                    ts=ts,
-                    track_id=tid,
-                    zones=zones,
-                    confidence=ent.conf,
-                    payload={
-                        "bbox_xywh": ent.bbox_xywh,
-                        "initial_pose": initial_pose,
-                    },
-                ))
                 continue
 
             # Use the last confirmed pose as a hint for zone lookup —
@@ -401,6 +398,32 @@ class EventDetector:
             state.last_conf = ent.conf
             state.last_bbox = ent.bbox_xywh
             state.frames_missing = 0
+            state.frames_seen += 1
+
+            # Confirmation gate: track must persist _new_confirm frames
+            # before we emit new_person and process pose/zone events.
+            # This filters phantom detections that appear for a few frames
+            # then vanish.
+            if not state.confirmed:
+                if state.frames_seen >= self._new_confirm:
+                    state.confirmed = True
+                    zones = zone_for_entity(ent, pose_hint=state.last_pose)
+                    state.last_zones = zones
+                    events.append(Event(
+                        type="new_person",
+                        ts=ts,
+                        track_id=tid,
+                        zones=zones,
+                        confidence=ent.conf,
+                        payload={
+                            "bbox_xywh": ent.bbox_xywh,
+                            "initial_pose": state.last_pose,
+                        },
+                    ))
+                # Update center for motion tracking even while unconfirmed
+                state.last_center_x = ent.bbox_xywh[0]
+                state.last_center_y = ent.bbox_xywh[1]
+                continue
 
             # Pose transition with hysteresis.
             raw_pose = _classify_pose(
@@ -499,18 +522,23 @@ class EventDetector:
             state = self._tracks[tid]
             state.frames_missing += 1
             if state.frames_missing >= self._lost_grace:
-                events.append(Event(
-                    type="lost_person",
-                    ts=ts,
-                    track_id=tid,
-                    zones=[],
-                    confidence=state.last_conf,
-                    payload={
-                        "last_zones": state.last_zones,
-                        "last_bbox_xywh": state.last_bbox,
-                        "frames_missing": state.frames_missing,
-                    },
-                ))
+                if state.confirmed:
+                    # Real track that persisted long enough — report departure.
+                    events.append(Event(
+                        type="lost_person",
+                        ts=ts,
+                        track_id=tid,
+                        zones=[],
+                        confidence=state.last_conf,
+                        payload={
+                            "last_zones": state.last_zones,
+                            "last_bbox_xywh": state.last_bbox,
+                            "frames_missing": state.frames_missing,
+                        },
+                    ))
+                # Unconfirmed tracks that vanish are silently dropped —
+                # they were phantom detections that never persisted long
+                # enough to be reported as new_person.
                 del self._tracks[tid]
 
         return events

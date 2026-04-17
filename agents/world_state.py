@@ -88,6 +88,7 @@ class Baselines:
     typical_occupancy: int = 0
     power_idle_lamp_w: float = 0.0
     power_idle_fan_w: float = 0.0
+    ambient_audio_classes: list[str] = field(default_factory=list)
     calibrated: bool = False
 
 
@@ -364,6 +365,7 @@ class WorldState:
                 "typical_occupancy": self._baselines.typical_occupancy,
                 "power_idle_lamp_w": round(self._baselines.power_idle_lamp_w, 1),
                 "power_idle_fan_w": round(self._baselines.power_idle_fan_w, 1),
+                "ambient_audio_classes": list(self._baselines.ambient_audio_classes),
                 "calibrated": self._baselines.calibrated,
             },
         }

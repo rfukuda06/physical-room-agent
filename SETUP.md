@@ -28,7 +28,7 @@ pip install -r requirements.txt
 Sanity check that the big ones imported cleanly:
 
 ```bash
-python -c "import ultralytics, tensorflow, anthropic, google.generativeai, fastapi; print('ok')"
+python -c "import ultralytics, tensorflow, anthropic, google.genai, fastapi; print('ok')"
 ```
 
 ## 3. Confirm `.env` exists and is populated

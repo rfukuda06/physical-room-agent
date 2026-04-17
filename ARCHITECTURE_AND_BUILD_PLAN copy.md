@@ -28,11 +28,11 @@ When we change something material, we'll update this doc so it stays accurate. I
 
 A continuously running Physical Agent that perceives your physical space in real time and demonstrates the complete agentic loop: **Sense → Fuse → Reason → Act**. The agent narrates observations aloud, detects anomalies against learned baselines, investigates unusual events across multiple sensor modalities, and takes physical actions (controlling lighting and airflow) based on its reasoning.
 
-This directly mirrors Archetype AI's stated architecture: Newton (continuous multi-modal perception) + Physical Agents (on-demand reasoning and action). The MVP demonstrates understanding of the platform thesis, not just one vertical.
+This directly mirrors Archetype AI's stated architecture: Newton (continuous multi-modal perception) + Physical Agents (on-demand reasoning and action).
 
 ### 1.1 Product purpose (the one-sentence thesis)
 
-This project is not a smart-home gadget and not a bag of features. It is the **smallest possible working instance of physical AI** — a single agent that senses a physical space with multiple modalities, reasons about what's happening in human terms, and acts back on the space. The room is a scaled-down factory; the lamp is a scaled-down actuator. The same "sense → fuse → reason → act" loop that runs Archetype's industrial systems, pointed at a room.
+This project is not a smart-home gadget and not a bag of features. It is the **smallest possible working instance of physical AI** — a single agent that senses a physical space with multiple modalities, reasons about what's happening in human terms, and acts back on the space. The same "sense → fuse → reason → act" loop that runs Archetype's industrial systems, pointed at a room.
 
 **One-sentence pitch:**
 > Newton-for-a-Room is a physical AI agent that continuously watches a space and helps it serve the people in it — it senses presence, activity, sound, and power; reasons about what's happening in plain English; and adjusts the environment accordingly. It's the room-scale version of the industrial systems Archetype builds.
@@ -353,9 +353,10 @@ WorldState:
     audio_mean_db: float
     audio_std_db: float
     typical_occupancy: int
-    light_baseline: float
     power_idle_lamp_w: float
     power_idle_fan_w: float
+    ambient_audio_classes: list[str]   # persistent YAMNet classes to suppress
+    calibrated: bool
 
   # Event history
   recent_events: ring buffer of last 50 events
@@ -568,8 +569,8 @@ The blocks below are in the order we *expect* to tackle things — perception fi
 | Block | Task | Hours |
 |---|---|---|
 | 1 | ✅ World state schema + update logic (YOLO feeds machine state, Gemini feeds semantic state). Implemented `agents/world_state.py`: thread-safe `WorldState` class with `EntityState`, `AudioSnapshot`, `DeviceState`, `Baselines` dataclasses. Updated every main-loop tick via `update_from_yolo/audio/devices/push_event`. Snapshotable for LLM prompts. Added `zones_for(tid)` to EventDetector. Wired into `main.py` with 'd' debug keybind to dump snapshot. | 1.0 |
-| 2 | Baseline calibration module: ~30 s learning phase for audio floor, power profile, occupancy (reduced from original 5–10 min — 30 s gives enough samples for all baselines) | 1.0 |
-| 3 | Observer agent (Beat 1): Gemini 2.5 Flash integration (changed from 2.0 Flash — being shut down June 2026). Migrate to `google-genai` SDK. Event-driven calls with frame buffer + YOLO signals, quick factual narration, world state JSON updates | 2.0 |
+| 2 | ✅ Baseline calibration module: `CalibrationCollector` in `agents/baselines.py`. Distinct 30s startup phase that polls all Layer 0 sensors, accumulates samples, and computes `Baselines` (audio mean/std dB, typical occupancy, lamp/fan idle power, ambient YAMNet classes). Keeps WorldState warm during calibration so monitoring starts with populated state. Added `ambient_audio_classes` field to `Baselines` dataclass. Progress bar overlay on video window + console status every 5s. Speech dB excluded from noise floor. Handles missing plugs gracefully. | 1.0 |
+| 3 | ✅ Observer agent (Beat 1): Gemini 2.5 Flash with `thinking_budget=0` (disabled thinking for low-latency). Migrated to `google-genai` SDK (v1.73.1). `Observer` class handles Gemini calls with frame resize (≤384px → 258 tokens/image), JSON parsing with fallback, exponential backoff. `ObserverWorker` runs in daemon thread with 0.5s debounce and 45s periodic refresh. Wired into main.py: events push non-blocking, results poll non-blocking, Beat 1 narrations print to console with routing decisions logged. Fallback narration from sensor data when API fails. | 2.0 |
 | 4 | Reasoner agent (Beat 2): Claude Sonnet 4.6 integration — receives Observer output + full context, deep reasoning, judgment, action decisions, thoughtful narration | 2.0 |
 | 5 | Two-beat TTS pipeline: Beat 1 plays immediately, Beat 2 queues after Beat 1 finishes | 0.5 |
 | 6 | Decision module: lamp follows occupancy, fan follows extended presence, anomaly alerts spoken | 1.0 |

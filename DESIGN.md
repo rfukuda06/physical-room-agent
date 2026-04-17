@@ -9,7 +9,7 @@ Legend:
 
 ---
 
-## Current state (Day 2 — end of Block 1)
+## Current state (Day 2 — end of Block 3)
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -31,8 +31,8 @@ Legend:
 │         └── consumed by YoloEngine                                      │
 │                                                                         │
 │     (b) buffer_snapshot(sec)   → rolling 10s @ 10 FPS / 720p            │
-│         └── future: Observer/Reasoner will read this to see             │
-│             "what led up to" an event                                   │
+│         └── consumed by Observer (resize → 384px, JPEG, 258 tokens)    │
+│             to see "what led up to" an event                            │
 │                                                                         │
 │   Locks: separate `_latest_lock` and `_buffer_lock` so a slow           │
 │   buffer reader can't starve the live feed.                             │
@@ -147,7 +147,7 @@ Legend:
 │   same threshold for both on and off transitions (symmetric hysteresis).│
 │                                                                         │
 │   dB spike detection: fires when current dB exceeds a 30 s rolling      │
-│   mean by ≥ AUDIO_SPIKE_DB_THRESHOLD (15 dB). 3 s cooldown.            │
+│   mean by ≥ AUDIO_SPIKE_DB_THRESHOLD (25 dB). 3 s cooldown.            │
 │                                                                         │
 │   AudioClassifier is an ABC — YamNetClassifier is the current impl;    │
 │   swap in CLAP / BEATs / EfficientAT without changing AudioMonitor.    │
@@ -160,34 +160,45 @@ Legend:
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│  ✅ main.py — Orchestrator (Block 8, updated Day 2 Block 1)             │
+│  ✅ main.py — Orchestrator (Block 8, updated Day 2 Block 3)             │
 │                                                                         │
-│   Wires all Layer 0 components into a single monitoring loop:           │
+│   Wires all Layer 0 components + Observer into a monitoring loop:       │
 │     1. Starts CameraCapture (background thread)                         │
 │     2. Starts YoloEngine (background thread)                            │
 │     3. Starts AudioMonitor (PortAudio callback + classify thread)       │
 │     4. Creates EventDetector (synchronous, pulled each tick)            │
 │     5. Starts PlugManager (async loop + background discover thread)     │
 │     6. Creates WorldState (shared in-memory model)                      │
+│     6b. Calibration phase (Day 2 Block 2):                              │
+│         - CalibrationCollector.run() blocks ~30s                        │
+│         - Polls audio/YOLO/plugs, accumulates samples                   │
+│         - Keeps WorldState warm (update_* calls each tick)              │
+│         - Video window shows progress bar + countdown overlay           │
+│         - Console prints status every 5s                                │
+│         - Stores Baselines via world.set_baselines()                    │
+│     6c. Creates Observer + ObserverWorker (Day 2 Block 3):              │
+│         - ObserverWorker starts daemon thread                           │
+│         - Periodic refresh timer runs independently                     │
 │     7. Main loop:                                                       │
 │        - detector.tick(engine.latest_result()) → YOLO events            │
 │        - audio.tick()                          → audio events           │
 │        - merge → print to console + render on video overlay             │
-│        - world.update_from_yolo(result, detector)  ← NEW (Day 2 B1)   │
-│        - world.update_audio(audio.latest_state())  ← NEW              │
-│        - world.update_devices(plugs)               ← NEW              │
-│        - world.push_event(ev) for each event       ← NEW              │
+│        - world.update_from_yolo/audio/devices/push_event                │
+│        - push events to ObserverWorker (non-blocking)                   │
+│        - poll ObserverWorker for Beat 1 results:                        │
+│          → print [BEAT 1] narration to console + overlay                │
+│          → call should_call_reasoner() for routing decision             │
 │                                                                         │
 │   Video window shows: YOLO boxes/skeleton + zone polygons + rolling     │
 │   event log (top-left) + track status (bottom-left) + audio state       │
-│   (bottom-right). Console prints one line per event + status every 2s.  │
+│   (bottom-right) + Beat 1 narrations in event log.                      │
+│   Console prints one line per event + status every 2s.                  │
 │   Press 'd' in video window to dump WorldState snapshot to console.     │
 │                                                                         │
 │   Graceful shutdown on Ctrl+C or 'q' keypress. Prints event summary.   │
 │                                                                         │
 │   NOT YET WIRED (future blocks):                                       │
-│     - Calibration / baselines (Day 2 Block 2)                           │
-│     - Observer / Reasoner (Day 2 Blocks 3-4)                            │
+│     - Reasoner (Day 2 Block 4)                                          │
 │     - TTS actuator (Day 2 Block 5)                                      │
 │     - Decision logic (Day 2 Block 6)                                    │
 │     - FastAPI server (Day 3)                                            │
@@ -203,7 +214,14 @@ Legend:
 ├────────────────────────────────────────────────────────────────────────┤
 │  ✅ agents/routing.py — Hybrid Reasoner routing policy                   │
 ├────────────────────────────────────────────────────────────────────────┤
-│  🟡 agents/observer.py, reasoner.py, baselines.py, decisions.py — stubs │
+│  ✅ agents/baselines.py — CalibrationCollector (Day 2 Block 2)            │
+│     30s startup phase. Learns audio floor, power profile, occupancy,   │
+│     and persistent YAMNet classes. Stores Baselines in WorldState.     │
+├────────────────────────────────────────────────────────────────────────┤
+│  ✅ agents/observer.py — Observer + ObserverWorker (Day 2 Block 3)       │
+│     Gemini 2.5 Flash integration. Event-driven + 45s periodic refresh.  │
+│     Threaded worker with 0.5s debounce. Fallback on API failure.        │
+│  🟡 agents/reasoner.py, decisions.py — stubs                            │
 ├────────────────────────────────────────────────────────────────────────┤
 │  🟡 actuators/*.py — (Day 2) TTS speaker + smart_plug wrapper. Stubs.   │
 ├────────────────────────────────────────────────────────────────────────┤
@@ -399,7 +417,8 @@ snapshot()
   │    └─ spike_magnitude_db: float
   ├─ devices: {"light": {on, power_w}, "fan": {on, power_w}}
   ├─ baselines: {audio_mean_db, audio_std_db, typical_occupancy,
-  │              power_idle_lamp_w, power_idle_fan_w, calibrated}
+  │              power_idle_lamp_w, power_idle_fan_w,
+  │              ambient_audio_classes, calibrated}
   ├─ scene_description: str          # written by Observer
   ├─ activity_summary: str           # written by Observer
   ├─ mood: "quiet"|"active"|"transitional"  # written by Observer
@@ -415,6 +434,79 @@ when tracks leave.
 **Thread safety:** Single `threading.Lock`. All public methods acquire
 it. `snapshot*()` returns deep copies so callers never hold references
 to live data. The lock is held briefly (no I/O inside it).
+
+### CalibrationCollector (Day 2 Block 2)
+
+- `CalibrationCollector(world, engine, detector, audio, plugs, duration)` — constructor.
+- `run(overlay_callback) -> Baselines` — blocks for `duration` seconds, returns computed baselines.
+
+Runs as a distinct startup phase between WorldState init and the main loop.
+All Layer 0 systems are already running; the collector polls their published
+state at regular intervals:
+
+| Data source | Poll interval | Method used | Notes |
+|---|---|---|---|
+| Audio dB + classes | ~500 ms | `audio.latest_state()` | Speech periods excluded from dB if `CALIBRATION_EXCLUDE_SPEECH_FROM_FLOOR` |
+| Occupancy count | ~1 s | `detector.active_track_ids()` | Median used, robust to tracker drops |
+| Plug power | ~5 s | `plugs.state(alias)` | Handles None gracefully if plugs not yet discovered |
+
+During calibration, WorldState is kept warm (update_from_yolo/audio/devices
+called each tick) so entities, audio, and device state are already populated
+when monitoring begins.
+
+`ambient_audio_classes` are YAMNet classes that appear in >=
+`CALIBRATION_AMBIENT_CLASS_MIN_RATIO` (30%) of classification windows,
+excluding speech classes. These are stored in Baselines so Observer/Reasoner
+prompts can deprioritize them as part of the room's normal sound profile.
+
+### Observer (Day 2 Block 3)
+
+- `Observer(world, camera)` — constructor. Creates a `genai.Client` for Gemini API calls.
+- `Observer.call(trigger_events, frame) -> dict | None` — synchronous Gemini call.
+
+**Input assembly:**
+1. `world.snapshot_for_observer()` — entities, audio, devices, baselines (no semantic fields)
+2. Current frame + 1 prior frame from `camera.buffer_snapshot(3)` (~2s ago)
+3. Frames resized to ≤384px (both dims) → 258 tokens/image in Gemini's tokenizer
+4. JPEG encoded at quality 70
+
+**Gemini call config:**
+- Model: `config.GEMINI_MODEL` (default: `gemini-2.5-flash`)
+- `thinking_budget=0` — disables reasoning overhead for low-latency factual output
+- `response_mime_type="application/json"` — structured JSON output
+- `temperature=0.3`, `max_output_tokens=300`
+- System prompt instructs factual-only output, YAMNet-as-hint rule
+
+**Output contract:**
+
+```
+{
+  "narration": str,           # short factual description, spoken as Beat 1
+  "world_state_update": {
+    "scene_description": str, # one-line scene summary
+    "activity_summary": str,  # what person(s) are doing
+    "mood": str               # "quiet" | "active" | "transitional"
+  },
+  "escalate": bool,           # should the Reasoner fire?
+  "escalate_reason": str      # brief explanation
+}
+```
+
+**Fallback on API failure:** deterministic narration from sensor data
+(people count + event types). Escalates conservatively (only for
+`REASONER_ALWAYS` event types). Exponential backoff on consecutive failures.
+
+### ObserverWorker (Day 2 Block 3)
+
+- `ObserverWorker(observer)` — constructor.
+- `.start()` / `.stop()` — lifecycle.
+- `.push_events(events, frame)` — non-blocking, called from main loop.
+- `.poll_result() -> (dict, list[str]) | None` — non-blocking, returns (output, event_types).
+
+**Debouncing:** 0.5s after wake, drain all pending events into one call.
+**Periodic refresh:** 45s timer. When no events push for 45s, fires a
+refresh call with empty event list (still sends camera frames).
+**Threading:** single daemon thread. No queue needed — latest result only.
 
 ---
 
@@ -436,15 +528,21 @@ re-captured** via `python -m perception.zone_map` (walkthrough in
 
 ---
 
-## Runtime threads (currently — Block 7)
+## Runtime threads (currently — Block 3)
 
 ```
-┌── MainThread ──────────── main.py loop: tick() both detectors, merge events,
+┌── MainThread ──────────── Phase 1: CalibrationCollector.run() (~30s)
+│                            Phase 2: main.py loop: tick() detectors, merge
+│                            events, push to ObserverWorker, poll results,
 │                            render cv2 overlay, print to console
 ├── camera-capture ──────── cv2.VideoCapture.read() → _latest_frame, buffer
 ├── yolo-engine ─────────── pulls latest_frame, runs model.track, publishes
 ├── [PortAudio callback] ── sounddevice-managed: appends audio chunks, dB
 ├── audio-classify ──────── YAMNet every 500ms → smoothing → events
+├── observer-worker ─────── debounce 0.5s → Observer.call() → Gemini API
+│                            (~1s response). Also fires periodic refresh
+│                            every 45s during quiet periods. Results posted
+│                            back to main thread via poll_result().
 ├── kasa-loop ───────────── asyncio event loop (daemon); receives coroutines
 │                            from main thread via run_coroutine_threadsafe
 ├── plug-discover ───────── one-shot thread: runs PlugManager.discover(),
@@ -453,7 +551,7 @@ re-captured** via `python -m perception.zone_map` (walkthrough in
                               every 5 s, writes PlugState into _states dict
 ```
 
-No IPC, no queues between the synchronous layers — just shared state behind locks. The kasa layer is the exception: it needs asyncio because python-kasa is async-only, so it lives in its own event loop with a thread-safe bridge (`run_coroutine_threadsafe`).
+No IPC, no queues between the synchronous layers — just shared state behind locks. The kasa layer is the exception: it needs asyncio because python-kasa is async-only, so it lives in its own event loop with a thread-safe bridge (`run_coroutine_threadsafe`). The observer-worker thread communicates with MainThread via simple `threading.Event` signals and a shared result slot (no queue needed — only the latest result matters).
 
 ---
 

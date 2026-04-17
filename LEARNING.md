@@ -258,6 +258,30 @@ Leave at 1 unless symptoms show.
 
 ---
 
+## 2026-04-16 — Day 2, Block 3 (Observer / Gemini integration)
+
+### `[gotcha]` Gemini 2.5 Flash has thinking ON by default — kills latency
+
+**What I assumed:** Gemini 2.5 Flash would respond in ~0.5-1s for a simple factual description task, matching its "fast" branding.
+
+**What we discovered:** Gemini 2.5 Flash has *thinking* (internal chain-of-thought reasoning) enabled by default. This adds significant latency and cost — the model reasons internally before responding, even for simple tasks like "describe what you see in this image." The thinking tokens also count toward output cost at $2.50/M tokens.
+
+**Fix:** Set `thinking_config=types.ThinkingConfig(thinking_budget=0)` in the `GenerateContentConfig`. This disables the internal reasoning entirely, which is correct for the Observer's role — it does factual description, not reasoning (that's the Reasoner's job).
+
+**Also discovered:** Gemini 2.5 Flash-Lite ($0.10/M input, $0.40/M output) has thinking OFF by default and is 3-6x cheaper. It's a viable fallback if Flash quality isn't needed. Made it swappable via `config.GEMINI_MODEL`.
+
+**Lesson:** Always check whether a model has "thinking" or "reasoning" mode enabled by default. For low-latency production use, explicitly disable it unless you need it. The model name ("Flash") doesn't guarantee fast — the config does.
+
+### `[gotcha]` Image token cost depends on resolution — resize before sending
+
+**What I assumed:** each image sent to Gemini costs roughly the same number of tokens.
+
+**What's actually true:** Gemini tokenizes images based on dimensions. Both dims ≤ 384px = 258 tokens flat. Larger images get tiled at 768×768, each tile = 258 tokens. Our raw 1280×720 frames would cost 2 tiles = 516 tokens each. By resizing to ≤384px (preserving aspect ratio), we halve the image token cost — 258 tokens instead of 516 per frame.
+
+**Lesson:** for multimodal LLM calls, always check the image tokenization rules. A cheap resize before the API call can cut your image costs 50%+ with negligible quality loss for scene understanding tasks.
+
+---
+
 ## Template for new entries
 
 ```
