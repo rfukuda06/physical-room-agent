@@ -21,18 +21,26 @@ Observer/Reasoner yet; this loop is the skeleton for the full pipeline.
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import sys
+import threading
 import time
+
+from typing import Optional
 
 import cv2
 import numpy as np
+
+import json
 
 import config
 from perception.camera import CameraCapture
 from perception.yolo_engine import YoloEngine
 from perception.event_detector import Event, EventDetector
 from perception.audio import AudioMonitor
+from perception.plugs import PlugManager
+from agents.world_state import WorldState
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +94,7 @@ _LOG_FG = {
     "audio_spike":         (  0, 180, 255),
     "speech_start":        (200, 200,   0),
     "speech_end":          (200, 200,   0),
+    "plug_power":          (180, 255, 180),
 }
 _STATUS_FG = (255, 255, 255)
 _LOG_MAX_LINES = 10
@@ -96,6 +105,7 @@ def _draw_overlay(
     recent_events: list[tuple[float, Event]],
     detector: EventDetector,
     audio: AudioMonitor,
+    plugs: Optional[PlugManager] = None,
 ) -> np.ndarray:
     """Draw zones, event log, track status, and audio state onto the frame."""
     out = frame
@@ -143,10 +153,24 @@ def _draw_overlay(
             f"audio: {audio_st.audio_level_db:.0f}dB  "
             f"{'SPEECH' if audio_st.speech_active else audio_st.dominant_class}"
         )
-        # Right-align
         (tw, _), _ = cv2.getTextSize(audio_str, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.putText(out, audio_str, (w - tw - 10, h - 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, _STATUS_FG, 1, cv2.LINE_AA)
+
+    # Plug status — second line from bottom, right-aligned
+    if plugs is not None:
+        parts = []
+        for alias in (config.LAMP_PLUG_ALIAS, config.FAN_PLUG_ALIAS):
+            st = plugs.state(alias)
+            if st is None:
+                parts.append(f"{alias}=?")
+            else:
+                onoff = "ON" if st.is_on else "off"
+                parts.append(f"{alias}={onoff} {st.power_w:.0f}W")
+        plug_str = "plugs: " + "  ".join(parts)
+        (tw, _), _ = cv2.getTextSize(plug_str, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+        cv2.putText(out, plug_str, (w - tw - 10, h - 35),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 255, 180), 1, cv2.LINE_AA)
 
     return out
 
@@ -166,7 +190,7 @@ def main() -> None:
     print("  Newton-for-a-Room — Layer 0 smoke test (Block 8)")
     print("=" * 60)
     print(f"  Camera index:       {config.CAMERA_INDEX}")
-    print(f"  Audio device index: {config.AUDIO_DEVICE_INDEX}")
+    print(f"  Audio device:       {config.AUDIO_DEVICE_NAME}")
     print(f"  Zones loaded:       {list(config.ZONES.keys()) or '(none)'}")
     print(f"  Observer enabled:   {config.OBSERVER_ENABLED}  (not wired yet)")
     print(f"  Reasoner enabled:   {config.REASONER_ENABLED}  (not wired yet)")
@@ -213,8 +237,10 @@ def main() -> None:
     log.info("YOLO engine started (model=%s, device=%s)", config.YOLO_MODEL, config.YOLO_DEVICE)
 
     # -- Step 3: Start audio monitor --
+    audio_device_index = config.resolve_audio_device()
+    log.info("Audio device resolved: '%s' → index %d", config.AUDIO_DEVICE_NAME, audio_device_index)
     audio = AudioMonitor(
-        device_index=config.AUDIO_DEVICE_INDEX,
+        device_index=audio_device_index,
         sample_rate=config.AUDIO_SAMPLE_RATE,
         window_seconds=config.AUDIO_WINDOW_SECONDS,
         classify_interval=config.YAMNET_CLASSIFY_INTERVAL_SECONDS,
@@ -225,26 +251,54 @@ def main() -> None:
         db_rolling_window=config.AUDIO_DB_ROLLING_WINDOW_SECONDS,
     )
     audio.start()
-    log.info("Audio monitor started (device=%d)", config.AUDIO_DEVICE_INDEX)
+    log.info("Audio monitor started (device=%d)", audio_device_index)
 
     # -- Step 4: Create event detector --
     detector = EventDetector()
 
-    # -- Step 5 (skipped): Smart plugs -- Block 7 deferred
-    # -- Step 6 (skipped): Calibration -- Day 2 Block 2
+    # -- Step 5: Smart plugs --
+    plugs: Optional[PlugManager] = None
+    if config.KASA_USERNAME and config.KASA_PASSWORD:
+        plugs = PlugManager()
+        plugs.start()
+        log.info("Smart plug discovery starting (async, non-blocking)…")
+        # discover() blocks up to 15 s — run in a thread so the main loop
+        # can start immediately and plug states just appear once found.
+        def _bg_discover():
+            found = plugs.discover(timeout=15.0)
+            if found:
+                log.info("Smart plugs: both plugs discovered and polling started")
+            else:
+                log.warning("Smart plugs: discovery partial or failed — plug states may be unavailable")
+        threading.Thread(target=_bg_discover, daemon=True, name="plug-discover").start()
+    else:
+        log.info("Smart plugs: KASA credentials missing — skipping plug setup")
+
+    # -- Step 6: World state --
+    world = WorldState()
+    log.info("WorldState initialized")
+
+    # -- Step 6b (skipped): Calibration -- Day 2 Block 2
 
     # -- Step 7: Main monitoring loop --
     recent_events: list[tuple[float, Event]] = []  # (elapsed_sec, event)
     event_counts: dict[str, int] = {}
     t_start = time.monotonic()
     last_status_print = 0.0
+    last_display_frame: Optional[np.ndarray] = None  # cache so window always has content
 
-    # Graceful Ctrl+C
+    # Graceful Ctrl+C — first press sets the flag, second press force-exits.
     shutdown = False
+    _ctrl_c_count = 0
 
     def _signal_handler(sig, frame):
-        nonlocal shutdown
+        nonlocal shutdown, _ctrl_c_count
+        _ctrl_c_count += 1
+        if _ctrl_c_count >= 2:
+            print("\nForce-quitting.")
+            sys.exit(1)
         shutdown = True
+        print("\n(Ctrl+C again to force-quit)")
 
     signal.signal(signal.SIGINT, _signal_handler)
 
@@ -272,12 +326,26 @@ def main() -> None:
             if len(recent_events) > 50:
                 recent_events = recent_events[-50:]
 
+            # --- Update world state ---
+            world.update_from_yolo(result, detector)
+            audio_st = audio.latest_state()
+            if audio_st:
+                world.update_audio(audio_st)
+            if plugs:
+                world.update_devices(plugs)
+            for ev in all_events:
+                world.push_event(ev)
+
             # --- Render video overlay ---
+            # Always update last_display_frame when we have a new annotated result,
+            # then always call imshow so the window exists and waitKey reliably
+            # captures 'q' regardless of whether YOLO produced a result this tick.
             if result is not None and result.annotated_frame is not None:
-                frame = _draw_overlay(
-                    result.annotated_frame, recent_events, detector, audio
+                last_display_frame = _draw_overlay(
+                    result.annotated_frame, recent_events, detector, audio, plugs
                 )
-                cv2.imshow("Newton-for-a-Room  (q=quit)", frame)
+            if last_display_frame is not None:
+                cv2.imshow("Newton-for-a-Room  (q=quit)", last_display_frame)
 
             # --- Periodic status line (every 2 seconds) ---
             now = time.monotonic()
@@ -293,25 +361,40 @@ def main() -> None:
                         f"  audio={audio_st.audio_level_db:.0f}dB "
                         f"{'SPEECH' if audio_st.speech_active else audio_st.dominant_class}"
                     )
+                plug_info = ""
+                if plugs is not None:
+                    parts = []
+                    for alias in (config.LAMP_PLUG_ALIAS, config.FAN_PLUG_ALIAS):
+                        st = plugs.state(alias)
+                        if st is None:
+                            parts.append(f"{alias}=discovering…")
+                        else:
+                            parts.append(f"{alias}={'ON' if st.is_on else 'off'} {st.power_w:.0f}W")
+                    plug_info = "  plugs=[" + ", ".join(parts) + "]"
                 print(
                     f"  [status] t={now - t_start:6.1f}s  "
                     f"tracks={tid_strs or '(none)'}"
                     f"{audio_info}"
+                    f"{plug_info}"
                 )
                 last_status_print = now
 
-            # Check for 'q' keypress
-            if (cv2.waitKey(1) & 0xFF) == ord("q"):
+            # Check for keypresses: 'q' = quit, 'd' = dump world state
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
                 break
+            elif key == ord("d"):
+                snap = world.snapshot()
+                print("\n" + "=" * 60)
+                print("  WORLD STATE SNAPSHOT")
+                print("=" * 60)
+                print(json.dumps(snap, indent=2, default=str))
+                print("=" * 60 + "\n")
 
     finally:
         log.info("Shutting down...")
-        engine.stop()
-        audio.stop()
-        camera.stop()
-        cv2.destroyAllWindows()
 
-        # --- Summary ---
+        # Print summary immediately — doesn't depend on hardware cleanup.
         elapsed_total = time.monotonic() - t_start
         total_events = sum(event_counts.values())
         print()
@@ -321,6 +404,25 @@ def main() -> None:
             for etype, count in sorted(event_counts.items()):
                 print(f"    {etype:25s}  {count}")
         print("=" * 60)
+
+        # Run hardware cleanup in a daemon thread so a hung cap.release() or
+        # stream.close() (both known to stall on macOS) can't trap the process.
+        # os._exit(0) at the end kills everything; the OS reclaims the camera
+        # handle and mic handle regardless, so the green light will go off.
+        def _cleanup():
+            engine.stop()
+            audio.stop()
+            camera.stop()
+            if plugs is not None:
+                plugs.stop()
+            cv2.destroyAllWindows()
+
+        t = threading.Thread(target=_cleanup, daemon=True)
+        t.start()
+        t.join(timeout=6.0)
+        if t.is_alive():
+            log.warning("Cleanup timed out — force-exiting")
+        os._exit(0)
 
 
 if __name__ == "__main__":

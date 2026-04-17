@@ -527,9 +527,9 @@ class AudioMonitor:
                     ))
 
         # --- Speech transitions ---
-        # Longer off-threshold: 3 windows (1.5s) to ride through natural
+        # Longer off-threshold: 4 windows (2s) to ride through natural
         # pauses between sentences without flipping speech_end/speech_start.
-        _SPEECH_OFF_WINDOWS = 3
+        _SPEECH_OFF_WINDOWS = 4
 
         speech_reported = bool(self._reported_classes & self._valid_speech)
 
@@ -638,7 +638,7 @@ def _preview_main() -> None:
     )
 
     monitor = AudioMonitor(
-        device_index=config.AUDIO_DEVICE_INDEX,
+        device_index=config.resolve_audio_device(),
         sample_rate=config.AUDIO_SAMPLE_RATE,
         window_seconds=config.AUDIO_WINDOW_SECONDS,
         classify_interval=config.YAMNET_CLASSIFY_INTERVAL_SECONDS,

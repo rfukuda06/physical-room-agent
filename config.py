@@ -31,7 +31,7 @@ FAN_PLUG_IP_HINT = "172.20.10.3"
 
 # -- Camera / audio --
 CAMERA_INDEX = 0
-AUDIO_DEVICE_INDEX = 1  # MacBook Air Microphone
+AUDIO_DEVICE_NAME = "MacBook Air Microphone"  # matched by substring; index resolved at startup
 
 # -- Camera capture vs. buffer rates --
 # We capture live at full res/fps so YOLO's tracker gets crisp input,
@@ -91,15 +91,23 @@ YOLO_INFER_EVERY_N_FRAMES = 1   # bump to 2 if CPU is saturated
 #                        mid-stream (occlusion, motion blur). Waiting ~1s
 #                        avoids false lost_person/new_person churn for the
 #                        *same* physical person within one track lifetime.
-#   * WALK_MIN_DX_PX   — center-x displacement per frame above which we call
-#                        a standing person "walking". ~15px at 30 FPS ≈ 0.5
-#                        body-widths/second of lateral motion, which matches
-#                        a normal indoor walking pace for a 1280-wide frame.
+#   * WALK_MIN_DIST_PX — 2D center-point displacement per frame above which
+#                        we call a standing person "walking". Uses both x and
+#                        y so walking toward/away from the camera registers.
+#                        8px at 30 FPS on a 1280-wide frame catches normal
+#                        indoor walking in any direction.
+#   * WALK_HOLD_FRAMES — once walking is confirmed, hold the "walking" label
+#                        for this many frames even if motion drops below
+#                        threshold. Walking is naturally uneven (stride pauses,
+#                        turns) so without this, walking flickers to standing
+#                        and back on every slow frame.
 EVENT_POSE_KP_MIN_CONF = 0.5
-EVENT_POSE_HYSTERESIS_FRAMES = 5     # ~0.17s at 30 FPS
+EVENT_POSE_HYSTERESIS_FRAMES = 8     # ~0.27s at 30 FPS
 EVENT_ZONE_DWELL_FRAMES = 5          # ~0.17s — ignore drive-by boundary crosses
 EVENT_LOST_PERSON_GRACE_FRAMES = 30  # ~1.0s — tracker occlusion tolerance
-EVENT_WALK_MIN_DX_PX = 15            # per-frame center-x delta threshold
+EVENT_WALK_MIN_DIST_PX = 8           # per-frame 2D center-point distance threshold
+EVENT_WALK_HOLD_FRAMES = 15          # ~0.5s — stay "walking" through brief pauses
+EVENT_SIT_HOLD_FRAMES = 5            # ~0.17s — stay "sitting" through brief jitter
 
 # -- Baselines / calibration --
 CALIBRATION_SECONDS = 300  # 5 min
@@ -115,10 +123,9 @@ CALIBRATION_SECONDS = 300  # 5 min
 #     python -m perception.zone_map
 # It prints a ready-to-paste ZONES block. See SETUP.md §4c for the walkthrough.
 ZONES: dict[str, list[tuple[int, int]]] = {
-    "door": [(1052, 419), (953, 454), (1063, 541), (1220, 514), (1236, 494), (1087, 414)],
-    "desks": [(624, 713), (491, 492), (271, 511), (291, 714)],
-    "bed": [(165, 342), (177, 471), (688, 506), (613, 391)],
-    "closet": [(737, 381), (822, 494), (1062, 439), (1030, 387)],
+    "door": [(1009, 347), (909, 386), (1037, 505), (1184, 421)],
+    "desks": [(141, 710), (953, 710), (598, 427), (116, 422)],
+    "closet": [(718, 383), (780, 451), (1025, 370), (960, 322)],
 }
 
 # -- LLM toggles (useful during dev) --
@@ -140,3 +147,20 @@ REASONER_ALWAYS: set[str] = {
 # -- Output toggles --
 TTS_ENABLED = True        # speak narrations aloud; turn off during development
 TEXT_FEED_ENABLED = True  # always show narrations on the dashboard reasoning feed
+
+
+def resolve_audio_device(name: str = AUDIO_DEVICE_NAME) -> int:
+    """
+    Find the first input device whose name contains `name` (case-insensitive).
+    Returns its integer index for sounddevice.
+    Raises RuntimeError if not found — better to fail loudly at startup than
+    silently record from the wrong mic.
+    """
+    import sounddevice as sd
+    for i, d in enumerate(sd.query_devices()):
+        if d["max_input_channels"] > 0 and name.lower() in d["name"].lower():
+            return i
+    available = [d["name"] for d in sd.query_devices() if d["max_input_channels"] > 0]
+    raise RuntimeError(
+        f"Audio device '{name}' not found. Available input devices: {available}"
+    )

@@ -6,6 +6,40 @@ Tags: `[decision]` `[mistake]` `[aha]` `[tradeoff]` `[gotcha]`
 
 ---
 
+## 2026-04-16 — Day 2, Block 1 (model & SDK choices)
+
+### `[decision]` Gemini 2.0 Flash → 2.5 Flash, and migrating to google-genai SDK
+
+**What the plan said:** Use Gemini 2.0 Flash via the `google-generativeai` SDK (v0.8.6).
+
+**What we discovered:** Gemini 2.0 Flash is being **shut down June 1, 2026** — less than 2 months away. The `google-generativeai` SDK is deprecated in favor of `google-genai`. Meanwhile, Gemini 3 Flash exists but is in preview, 67% more expensive, and overkill for the Observer's factual-description role.
+
+**Decision:** Use **Gemini 2.5 Flash** (`gemini-2.5-flash`) — stable, cheap, fast enough for ~1s Beat 1 responses. Migrate to `google-genai` SDK when implementing Block 3. Model name goes in `config.py` for easy swapping.
+
+**Lesson:** Always check model deprecation timelines before building against a specific version. "Latest" in an architecture doc can go stale in weeks.
+
+---
+
+### `[decision]` Sonnet 4.6 over Opus for the Reasoner — speed wins
+
+**What we considered:** Whether Opus 4.6's better reasoning justified its slower response time for Beat 2.
+
+**Why Sonnet wins:** The two-beat rhythm demands Beat 2 arrives ~2-4 seconds after Beat 1. Opus takes 5-15 seconds with images — by the time it responds, the event feels stale. Sonnet at ~2-4s hits the sweet spot. The real intelligence lever is prompt quality and context richness, not model tier.
+
+**Lesson:** In real-time systems, latency constraints pick the model for you. If the UX requires a response within N seconds, that's your filter — then optimize prompts within that budget.
+
+---
+
+### `[decision]` Calibration reduced from 5 min to 30 seconds
+
+**What the plan said:** 5–10 minute calibration phase at startup.
+
+**What we realized:** 30 seconds gives ~30 audio dB samples (1/sec), 6 power readings (5 sec polling), and ~60 YAMNet classification windows (500ms each). That's more than enough for mean/std/median on all baselines. The 5-min number was a conservative placeholder that would make dev iteration painful.
+
+**Lesson:** Question placeholder numbers from planning docs. Calculate the actual sample counts you need, then derive the duration — don't just pick a round number that "feels safe."
+
+---
+
 ## 2026-04-15 — Hardware (iPhone as camera/audio source)
 
 ### `[decision]` Tried iPhone via Continuity Camera — reverted to MacBook

@@ -61,6 +61,7 @@ synchronous pull for everything else.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -127,6 +128,7 @@ class _TrackState:
     last_conf: float
     last_bbox: tuple[float, float, float, float]
     last_center_x: float
+    last_center_y: float
 
     last_zones: list[str]
     pending_zones: list[str]
@@ -135,6 +137,8 @@ class _TrackState:
     last_pose: str
     pending_pose: str
     pose_streak: int
+    walk_hold_remaining: int
+    sit_hold_remaining: int
 
     frames_missing: int
 
@@ -187,14 +191,15 @@ def _mean_y(
 def _classify_pose(
     entity: YoloEntity,
     last_center_x: Optional[float],
+    last_center_y: Optional[float],
     kp_min_conf: float,
-    walk_min_dx_px: float,
+    walk_min_dist_px: float,
 ) -> str:
     """Return one of POSE_STATES for this frame.
 
     Order matters: we check for ambiguous geometry first (return unknown),
     then sitting vs standing, then promote standing -> walking if the
-    center moved enough laterally since the previous frame.
+    center moved enough since the previous frame (2D distance).
 
     Heuristics:
       * `sitting`  — thighs roughly horizontal: |knee_y − hip_y| is small
@@ -208,7 +213,7 @@ def _classify_pose(
                      bbox wider than tall). Callers hold the last known
                      pose rather than flip.
     """
-    cx, _, w, h = entity.bbox_xywh
+    cx, cy, w, h = entity.bbox_xywh
 
     shoulder_y = _mean_y(entity.keypoints_xy, entity.keypoints_conf,
                          _LEFT_SHOULDER, _RIGHT_SHOULDER, kp_min_conf)
@@ -230,30 +235,33 @@ def _classify_pose(
             # When sitting upright, knees are roughly level with hips
             # (thighs horizontal), so the vertical hip→knee span
             # collapses to well under half the torso length.
-            raw = "sitting" if thigh_len < torso_len * 0.5 else "standing"
+            raw = "sitting" if thigh_len < torso_len * 0.45 else "standing"
         else:
             # Knees occluded (classic: person sitting behind a desk).
             # Fall back to aspect ratio: a standing upright person's bbox
             # is usually ~2× taller than wide; a sitting-behind-desk
             # bbox collapses toward square.
-            raw = "standing" if h > w * 1.8 else "sitting"
+            raw = "standing" if h > w * 1.6 else "sitting"
     elif w > 0 and h > 0:
         # No torso keypoints at all — use bbox aspect only.
         if w > h * 1.1:
             return "unknown"
-        elif h < w * 1.8:
+        elif h < w * 1.6:
             raw = "sitting"
         else:
             raw = "standing"
     else:
         return "unknown"
 
-    # Promote standing -> walking on real lateral motion. We only check
-    # this when already classified as standing; a person who is sitting
-    # or lying down doesn't suddenly become "walking" because their
-    # bbox shifted (YOLO jitter).
-    if raw == "standing" and last_center_x is not None:
-        if abs(cx - last_center_x) >= walk_min_dx_px:
+    # Promote standing -> walking on real motion. Uses 2D distance so
+    # walking toward/away from the camera registers, not just lateral.
+    # Only checked when already classified as standing — a sitting person
+    # doesn't become "walking" because their bbox shifted (YOLO jitter).
+    if raw == "standing" and last_center_x is not None and last_center_y is not None:
+        dx = cx - last_center_x
+        dy = cy - last_center_y
+        dist = math.sqrt(dx * dx + dy * dy)
+        if dist >= walk_min_dist_px:
             raw = "walking"
 
     return raw
@@ -277,7 +285,9 @@ class EventDetector:
         pose_hysteresis_frames: int = config.EVENT_POSE_HYSTERESIS_FRAMES,
         zone_dwell_frames: int = config.EVENT_ZONE_DWELL_FRAMES,
         lost_person_grace_frames: int = config.EVENT_LOST_PERSON_GRACE_FRAMES,
-        walk_min_dx_px: float = config.EVENT_WALK_MIN_DX_PX,
+        walk_min_dist_px: float = config.EVENT_WALK_MIN_DIST_PX,
+        walk_hold_frames: int = config.EVENT_WALK_HOLD_FRAMES,
+        sit_hold_frames: int = config.EVENT_SIT_HOLD_FRAMES,
     ) -> None:
         # Thresholds are injected so tests can override them without
         # monkey-patching config.
@@ -285,7 +295,9 @@ class EventDetector:
         self._pose_hyst = max(1, pose_hysteresis_frames)
         self._zone_dwell = max(1, zone_dwell_frames)
         self._lost_grace = max(1, lost_person_grace_frames)
-        self._walk_min_dx = walk_min_dx_px
+        self._walk_min_dist = walk_min_dist_px
+        self._walk_hold = max(1, walk_hold_frames)
+        self._sit_hold = max(1, sit_hold_frames)
 
         self._tracks: dict[int, _TrackState] = {}
         self._last_processed_ts: float = -1.0
@@ -300,6 +312,11 @@ class EventDetector:
         """Return the confirmed pose state for a track, or None if unknown."""
         state = self._tracks.get(track_id)
         return state.last_pose if state else None
+
+    def zones_for(self, track_id: int) -> list[str]:
+        """Return the confirmed zone list for a track, or empty if unknown."""
+        state = self._tracks.get(track_id)
+        return list(state.last_zones) if state else []
 
     # ---- main API ----
 
@@ -333,7 +350,6 @@ class EventDetector:
         # (new_person) or update its state and fire pose/zone transitions.
         for tid, ent in persons.items():
             seen_ids.add(tid)
-            zones = zone_for_entity(ent)
 
             state = self._tracks.get(tid)
             if state is None:
@@ -341,21 +357,25 @@ class EventDetector:
                 # (no prior center_x, so "walking" is never an initial
                 # pose — we need motion history for that).
                 initial_pose = _classify_pose(
-                    ent, last_center_x=None,
+                    ent, last_center_x=None, last_center_y=None,
                     kp_min_conf=self._kp_min_conf,
-                    walk_min_dx_px=self._walk_min_dx,
+                    walk_min_dist_px=self._walk_min_dist,
                 )
+                zones = zone_for_entity(ent, pose_hint=initial_pose)
                 self._tracks[tid] = _TrackState(
                     last_seen_ts=ts,
                     last_conf=ent.conf,
                     last_bbox=ent.bbox_xywh,
                     last_center_x=ent.bbox_xywh[0],
+                    last_center_y=ent.bbox_xywh[1],
                     last_zones=zones,
                     pending_zones=zones,
                     zone_streak=0,
                     last_pose=initial_pose,
                     pending_pose=initial_pose,
                     pose_streak=0,
+                    walk_hold_remaining=0,
+                    sit_hold_remaining=0,
                     frames_missing=0,
                 )
                 events.append(Event(
@@ -371,6 +391,10 @@ class EventDetector:
                 ))
                 continue
 
+            # Use the last confirmed pose as a hint for zone lookup —
+            # sitting people use bbox center instead of foot point.
+            zones = zone_for_entity(ent, pose_hint=state.last_pose)
+
             # Existing track — update "seen" bookkeeping up front so the
             # pose/zone branches below can assume it's live.
             state.last_seen_ts = ts
@@ -381,9 +405,36 @@ class EventDetector:
             # Pose transition with hysteresis.
             raw_pose = _classify_pose(
                 ent, last_center_x=state.last_center_x,
+                last_center_y=state.last_center_y,
                 kp_min_conf=self._kp_min_conf,
-                walk_min_dx_px=self._walk_min_dx,
+                walk_min_dist_px=self._walk_min_dist,
             )
+
+            # Walk hold: if currently walking and the classifier says
+            # "standing" (motion dropped), keep returning "walking" until
+            # the hold timer expires. This prevents flicker during natural
+            # stride pauses. Other poses (sitting, unknown) bypass the hold
+            # — sitting down mid-walk is a real transition.
+            if raw_pose == "walking":
+                state.walk_hold_remaining = self._walk_hold
+            elif raw_pose == "standing" and state.walk_hold_remaining > 0:
+                state.walk_hold_remaining -= 1
+                raw_pose = "walking"
+
+            # Sit hold: if currently sitting and the classifier says
+            # "standing" (keypoint jitter, leaning forward), keep returning
+            # "sitting" until the hold expires. Walking bypasses the hold
+            # — real motion overrides.
+            if raw_pose == "sitting":
+                state.sit_hold_remaining = self._sit_hold
+            elif raw_pose == "standing" and state.sit_hold_remaining > 0:
+                state.sit_hold_remaining -= 1
+                raw_pose = "sitting"
+
+            # Update center for next frame's motion check.
+            state.last_center_x = ent.bbox_xywh[0]
+            state.last_center_y = ent.bbox_xywh[1]
+
             if raw_pose == "unknown":
                 # Hold the confirmed pose; reset any in-flight candidate
                 # so a single garbage frame can't "count toward" a flip.
@@ -438,10 +489,6 @@ class EventDetector:
             else:
                 state.pending_zones = zones
                 state.zone_streak = 1
-
-            # Motion bookkeeping last — we used the *prior* center_x to
-            # classify walking, and now roll it forward for next tick.
-            state.last_center_x = ent.bbox_xywh[0]
 
         # Pass 2: age out tracks that weren't in this frame. We don't
         # immediately fire lost_person — give the tracker a grace window

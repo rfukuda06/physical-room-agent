@@ -140,20 +140,24 @@ def zones_for_point(x: float, y: float) -> list[str]:
     return out
 
 
-def _foot_point(entity: YoloEntity) -> tuple[float, float]:
-    """Pick the best "where is this entity on the floor" pixel for an entity.
+def _query_point(entity: YoloEntity, pose_hint: Optional[str] = None) -> tuple[float, float]:
+    """Pick the best "where is this entity" pixel for zone lookup.
 
-    Person + confident ankles  -> ankle midpoint (truest to the floor).
-    Person + occluded ankles    -> bbox bottom-center (lowest visible pixel).
-    Non-person                  -> bbox center (objects don't have feet, and
-                                    they usually don't straddle zones).
+    Any person + confident ankles               -> ankle midpoint.
+    Sitting person + occluded ankles            -> bbox center (feet are
+                                                   tucked under furniture,
+                                                   bottom-center overshoots
+                                                   the zone polygon).
+    Standing/walking person + occluded ankles   -> bbox bottom-center.
+    Non-person                                  -> bbox center.
     """
     cx, cy, w, h = entity.bbox_xywh
 
     if entity.cls_name != "person":
         return cx, cy
 
-    # Pose fields only exist when yolo_engine saw a pose-model result.
+    # Try ankle midpoint first — best floor-truth for any pose.
+    ankles_visible = False
     if (
         entity.keypoints_xy is not None
         and entity.keypoints_conf is not None
@@ -164,16 +168,27 @@ def _foot_point(entity: YoloEntity) -> tuple[float, float]:
         lc = entity.keypoints_conf[LEFT_ANKLE_IDX]
         rc = entity.keypoints_conf[RIGHT_ANKLE_IDX]
         if lc >= ANKLE_CONF_MIN and rc >= ANKLE_CONF_MIN:
+            ankles_visible = True
             return (lxy[0] + rxy[0]) * 0.5, (lxy[1] + rxy[1]) * 0.5
 
-    # Fallback: bottom-center of the bounding box.
+    # Ankles occluded. For sitting people, bbox bottom-center overshoots
+    # (it's below the zone polygon) — use bbox center instead.
+    if pose_hint == "sitting":
+        return cx, cy
+
+    # Standing/walking with occluded ankles: bottom-center is the best
+    # approximation of where their feet touch the floor.
     return cx, cy + h * 0.5
 
 
-def zone_for_entity(entity: YoloEntity) -> list[str]:
-    """Return the list of zones containing this entity's foot point."""
-    fx, fy = _foot_point(entity)
-    return zones_for_point(fx, fy)
+def zone_for_entity(entity: YoloEntity, pose_hint: Optional[str] = None) -> list[str]:
+    """Return the list of zones containing this entity's query point.
+
+    Pass ``pose_hint`` (e.g. the track's confirmed pose) so that sitting
+    people use bbox center instead of foot point.
+    """
+    qx, qy = _query_point(entity, pose_hint)
+    return zones_for_point(qx, qy)
 
 
 # ---------------------------------------------------------------------------

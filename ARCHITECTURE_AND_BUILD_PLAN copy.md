@@ -367,17 +367,17 @@ WorldState:
 
 ### Layer 0 — Local Perception
 - **OpenCV** — webcam frame capture only (the pipe)
-- **Ultralytics YOLO** (v8 or YOLO11) — detection, tracking, pose estimation, segmentation
+- **Ultralytics YOLO26n-pose** — detection, tracking (BoT-SORT), pose estimation (17 COCO keypoints)
 - **sounddevice** — microphone streaming, real-time dB level monitoring, spike detection
 - **TensorFlow + tensorflow-hub** — YAMNet (MobileNetV1-based audio tagger, 521 AudioSet classes, ~3.7M params, ~20ms CPU inference per 0.96s window, free and local)
 - **python-kasa** — TP-Link Kasa KP125M smart plug control + energy monitoring
 - **NumPy** — baseline statistics, anomaly scoring, frame buffer management
 
 ### Layer 1 — Observer Agent (Beat 1: fast factual)
-- **google-generativeai** — Gemini 2.0 Flash (quick scene description + world state update)
+- **google-genai** (migrating from deprecated `google-generativeai`) — **Gemini 2.5 Flash** (`gemini-2.5-flash`). Changed from Gemini 2.0 Flash which is being shut down June 1, 2026. Stable, cheap, fast enough for ~1s response.
 
 ### Layer 2 — Reasoner Agent (Beat 2: deep reasoning + actions)
-- **anthropic** — Claude Sonnet (judgment, intent reasoning, security assessment, action decisions)
+- **anthropic** — **Claude Sonnet 4.6** (`claude-sonnet-4-6-20250514`). ~2-4s response time, strong reasoning. Opus too slow (~10-15s) for the two-beat rhythm.
 
 ### Actuators
 - **edge-tts** or **pyttsx3** — text-to-speech for spoken narration
@@ -454,7 +454,9 @@ project_root/
 
 ## 5. Data Flow
 
-### Startup & calibration (first 5–10 minutes)
+### Startup & calibration (~30 seconds)
+
+*(Reduced from original 5–10 min estimate. 30 s provides ~30 audio dB samples, 6 power readings at 5 s polling, and ~60 YAMNet classification windows — sufficient for all baselines.)*
 
 1. Discover Kasa smart plugs on the network, authenticate
 2. Start YOLO, camera, and audio streams
@@ -556,7 +558,7 @@ The blocks below are in the order we *expect* to tackle things — perception fi
 | 4 | Zone map: define room zones (desk, door, couch, etc.) by pixel regions | 0.5 |
 | 5 | Event detector: consume YOLO output, emit structured events (new_person, lost_person, pose_change, zone_transition, object_moved) | 1.5 |
 | 6 | ✅ Audio streaming with sounddevice + dB monitoring + spike detection + YAMNet classification on rolling 1s windows + whitelist filter + temporal smoothing. Also added speech transition events (speech_start / speech_end) that fire on silence↔speech transitions only, not on steady state — mirrors EventDetector's pose_change pattern. | 1.5 |
-| 7 | 🟡 **Deferred** — Smart plug integration: power reading from both plugs, basic on/off control. Skipped for now; will wire in when hardware is ready. | 0.5 |
+| 7 | ✅ Smart plug integration: `PlugManager` wraps python-kasa in a private asyncio loop (daemon thread). Discovers KP125M plugs by alias (broadcast + IP-hint fallback), polls power every 5 s, exposes synchronous `turn_on/off/state` API. Wired into main.py: discovery runs non-blocking in a side thread; plug status shows in console status line and cv2 overlay. | 0.5 |
 | 8 | ✅ Smoke test: `main.py` orchestrator wires camera + YOLO + audio into a single loop. Events from both EventDetector and AudioMonitor merge into one stream, print to console, and render on a unified cv2 overlay (zones, event log, track status, audio dB/class). Graceful Ctrl+C/q shutdown with session summary. | 0.5 |
 
 **End-of-Day-1 checkpoint:** YOLO is running on your webcam with tracking IDs and pose estimation visible. Audio levels are streaming. Smart plugs respond to commands. Structured events are firing when you move, stand up, or leave frame. Everything prints to console. No Gemini/narration yet.
@@ -565,10 +567,10 @@ The blocks below are in the order we *expect* to tackle things — perception fi
 
 | Block | Task | Hours |
 |---|---|---|
-| 1 | World state schema + update logic (YOLO feeds machine state, Gemini feeds semantic state) | 1.0 |
-| 2 | Baseline calibration module: 5–10 min learning phase for audio floor, power profile, occupancy | 1.0 |
-| 3 | Observer agent (Beat 1): Gemini Flash integration — event-driven calls with frame buffer + YOLO signals, quick factual narration, world state JSON updates | 2.0 |
-| 4 | Reasoner agent (Beat 2): Claude Sonnet integration — receives Observer output + full context, deep reasoning, judgment, action decisions, thoughtful narration | 2.0 |
+| 1 | ✅ World state schema + update logic (YOLO feeds machine state, Gemini feeds semantic state). Implemented `agents/world_state.py`: thread-safe `WorldState` class with `EntityState`, `AudioSnapshot`, `DeviceState`, `Baselines` dataclasses. Updated every main-loop tick via `update_from_yolo/audio/devices/push_event`. Snapshotable for LLM prompts. Added `zones_for(tid)` to EventDetector. Wired into `main.py` with 'd' debug keybind to dump snapshot. | 1.0 |
+| 2 | Baseline calibration module: ~30 s learning phase for audio floor, power profile, occupancy (reduced from original 5–10 min — 30 s gives enough samples for all baselines) | 1.0 |
+| 3 | Observer agent (Beat 1): Gemini 2.5 Flash integration (changed from 2.0 Flash — being shut down June 2026). Migrate to `google-genai` SDK. Event-driven calls with frame buffer + YOLO signals, quick factual narration, world state JSON updates | 2.0 |
+| 4 | Reasoner agent (Beat 2): Claude Sonnet 4.6 integration — receives Observer output + full context, deep reasoning, judgment, action decisions, thoughtful narration | 2.0 |
 | 5 | Two-beat TTS pipeline: Beat 1 plays immediately, Beat 2 queues after Beat 1 finishes | 0.5 |
 | 6 | Decision module: lamp follows occupancy, fan follows extended presence, anomaly alerts spoken | 1.0 |
 | 7 | Integration test: walk-out/walk-in, clap, new person, sit-too-long scenarios | 0.5 |

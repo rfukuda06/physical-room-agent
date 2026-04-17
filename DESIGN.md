@@ -9,7 +9,7 @@ Legend:
 
 ---
 
-## Current state (Day 1 — end of Block 8)
+## Current state (Day 2 — end of Block 1)
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -17,7 +17,7 @@ Legend:
 │                                                                         │
 │   MacBook webcam ──▶ USB pipe ──▶ OpenCV                               │
 │   MacBook mic ──▶ PortAudio ──▶ sounddevice (device 1)                 │
-│   Kasa plugs    ⬜  (not yet discovered)                               │
+│   Kasa KP125M plugs ──▶ Wi-Fi/KLAP ──▶ python-kasa ──▶ PlugManager    │
 └────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -88,13 +88,17 @@ Legend:
 │     EventDetector().tick(result) -> list[Event]                        │
 │     detector.active_track_ids() -> list[int]                           │
 │     detector.pose_for(track_id) -> str | None                          │
+│     detector.zones_for(track_id) -> list[str]   (added Day 2 Block 1) │
 │                                                                         │
 │   Noise controls (see config.EVENT_*):                                 │
 │     • POSE_HYSTERESIS_FRAMES — pose must persist N frames to flip      │
 │     • ZONE_DWELL_FRAMES      — zone set must persist N frames to flip  │
 │     • LOST_PERSON_GRACE      — ~1s of absence before lost_person fires │
-│     • WALK_MIN_DX_PX         — center-x delta that promotes            │
-│                                 standing → walking                      │
+│     • WALK_MIN_DIST_PX       — 2D center-point distance that promotes  │
+│                                 standing → walking (x + y, not x-only) │
+│     • WALK_HOLD_FRAMES       — once walking, hold for N frames through │
+│                                 stride pauses before reverting to       │
+│                                 standing (~0.5s). Sitting bypasses hold.│
 │                                                                         │
 │   NOT implemented here (deferred):                                     │
 │     object_moved — non-person tracked class displacement. Demo is      │
@@ -109,13 +113,14 @@ Legend:
 │   query and caches each zone as an int32 (N, 1, 2) array for            │
 │   cv2.pointPolygonTest. Exposes:                                        │
 │                                                                         │
-│     zones_for_point(x, y)   -> list[str]                                │
-│     zone_for_entity(entity) -> list[str]                                │
-│     reload_zones()          -> None   (invalidate cache after edits)    │
+│     zones_for_point(x, y)            -> list[str]                       │
+│     zone_for_entity(entity, pose_hint) -> list[str]                     │
+│     reload_zones()                   -> None  (invalidate cache)        │
 │                                                                         │
-│   zone_for_entity picks the query point per-entity:                     │
-│     person + both ankle kps >= ANKLE_CONF_MIN (0.5) → ankle midpoint    │
-│     person + occluded ankles                       → bbox bottom-center │
+│   zone_for_entity picks the query point per-entity + pose:              │
+│     any person + confident ankles                  → ankle midpoint     │
+│     sitting + occluded ankles                      → bbox center        │
+│     standing/walking + occluded ankles             → bbox bottom-center │
 │     non-person                                     → bbox center        │
 │                                                                         │
 │   Ships its own click-to-define CLI (python -m perception.zone_map)     │
@@ -155,26 +160,32 @@ Legend:
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│  ✅ main.py — Orchestrator (Block 8)                                    │
+│  ✅ main.py — Orchestrator (Block 8, updated Day 2 Block 1)             │
 │                                                                         │
 │   Wires all Layer 0 components into a single monitoring loop:           │
 │     1. Starts CameraCapture (background thread)                         │
 │     2. Starts YoloEngine (background thread)                            │
 │     3. Starts AudioMonitor (PortAudio callback + classify thread)       │
 │     4. Creates EventDetector (synchronous, pulled each tick)            │
-│     5. Main loop:                                                       │
+│     5. Starts PlugManager (async loop + background discover thread)     │
+│     6. Creates WorldState (shared in-memory model)                      │
+│     7. Main loop:                                                       │
 │        - detector.tick(engine.latest_result()) → YOLO events            │
 │        - audio.tick()                          → audio events           │
 │        - merge → print to console + render on video overlay             │
+│        - world.update_from_yolo(result, detector)  ← NEW (Day 2 B1)   │
+│        - world.update_audio(audio.latest_state())  ← NEW              │
+│        - world.update_devices(plugs)               ← NEW              │
+│        - world.push_event(ev) for each event       ← NEW              │
 │                                                                         │
 │   Video window shows: YOLO boxes/skeleton + zone polygons + rolling     │
 │   event log (top-left) + track status (bottom-left) + audio state       │
 │   (bottom-right). Console prints one line per event + status every 2s.  │
+│   Press 'd' in video window to dump WorldState snapshot to console.     │
 │                                                                         │
 │   Graceful shutdown on Ctrl+C or 'q' keypress. Prints event summary.   │
 │                                                                         │
 │   NOT YET WIRED (future blocks):                                       │
-│     - Smart plugs (Block 7)                                             │
 │     - Calibration / baselines (Day 2 Block 2)                           │
 │     - Observer / Reasoner (Day 2 Blocks 3-4)                            │
 │     - TTS actuator (Day 2 Block 5)                                      │
@@ -183,11 +194,16 @@ Legend:
 └────────────────────────────────────────────────────────────────────────┘
                                     │
 ├────────────────────────────────────────────────────────────────────────┤
-│  🟡 perception/plugs.py — (Block 7, Day 1 — deferred)                   │
-│     python-kasa discovery + power reads + on/off control.               │
+│  ✅ perception/plugs.py — PlugManager (Block 7, Day 1)                  │
+│     python-kasa discovery + background power polling + on/off control.  │
 ├────────────────────────────────────────────────────────────────────────┤
-│  🟡 agents/*.py — (Day 2) observer, reasoner, world_state, routing,     │
-│                    baselines, decisions. All stubs right now.           │
+│  ✅ agents/world_state.py — WorldState (Day 2 Block 1)                   │
+│     Thread-safe in-memory model. Aggregates YOLO, audio, plug state.   │
+│     Updated every tick. Snapshotable for LLM prompts.                  │
+├────────────────────────────────────────────────────────────────────────┤
+│  ✅ agents/routing.py — Hybrid Reasoner routing policy                   │
+├────────────────────────────────────────────────────────────────────────┤
+│  🟡 agents/observer.py, reasoner.py, baselines.py, decisions.py — stubs │
 ├────────────────────────────────────────────────────────────────────────┤
 │  🟡 actuators/*.py — (Day 2) TTS speaker + smart_plug wrapper. Stubs.   │
 ├────────────────────────────────────────────────────────────────────────┤
@@ -322,6 +338,84 @@ register at all.
   hallucinate an explanation.  "I heard a loud sound but couldn't
   identify what caused it" is a valid observation.
 
+### PlugManager
+
+- `start()` — starts background asyncio loop in a daemon thread.
+- `discover(timeout=15) -> bool` — blocks until both plugs found or timeout; fires background polling task on success.
+- `state(alias) -> PlugState | None` — most recent polled snapshot, or None if plug not yet found.
+- `all_states() -> dict[str, PlugState]` — all known plug states.
+- `turn_on(alias) -> bool` / `turn_off(alias) -> bool` — synchronous control; refreshes `PlugState` immediately after toggle.
+- `stop()` — cancels polling task, shuts down event loop.
+
+`PlugState` snapshot:
+
+```
+PlugState
+  ├─ alias: str          # "light" or "fan"
+  ├─ is_on: bool
+  ├─ power_w: float      # current draw in watts (from KP125M energy module)
+  ├─ voltage_v: float    # volts
+  ├─ current_a: float    # amps
+  └─ ts: float           # monotonic timestamp of last poll
+```
+
+Discovery strategy: UDP broadcast first, direct-IP fallback for any alias not surfaced by broadcast (IPs can rotate on hotspot restarts, so alias matching is the authoritative source).
+
+### WorldState (Day 2 Block 1)
+
+Thread-safe in-memory world model. Aggregates all Layer 0 signals into
+one queryable, JSON-serializable object. Updated every main-loop tick.
+Snapshotable for LLM prompt building.
+
+**Public API:**
+- `update_from_yolo(result, detector)` — rebuild entity list from YOLO + EventDetector
+- `update_audio(audio_state)` — copy latest AudioState
+- `update_devices(plugs)` — copy latest plug states
+- `push_event(event)` — append to 50-event ring buffer
+- `set_baselines(baselines)` — store calibration results (Block 2)
+- `apply_observer_update(dict)` — merge semantic fields from Observer (Block 3)
+- `apply_reasoner_update(dict)` — merge semantic fields from Reasoner (Block 4)
+- `snapshot() -> dict` — full deep copy, JSON-serializable
+- `snapshot_for_observer() -> dict` — lighter (no semantic fields, no events)
+- `snapshot_for_reasoner() -> dict` — full (semantic fields + event history)
+
+**Snapshot shape:**
+
+```
+snapshot()
+  ├─ timestamp: ISO datetime string
+  ├─ entities: list[dict]
+  │    ├─ id: int                    # track_id
+  │    ├─ bbox_xywh: [cx, cy, w, h]
+  │    ├─ zones: ["desk", ...]
+  │    ├─ pose: "sitting" | "standing" | "walking" | "unknown"
+  │    ├─ seconds_in_frame: float    # how long this track has been visible
+  │    └─ velocity_px_per_s: float
+  ├─ people_count: int
+  ├─ audio:
+  │    ├─ level_db, dominant_class, speech_active
+  │    ├─ top_classes: [{label, confidence}, ...]
+  │    ├─ recent_spike: bool
+  │    └─ spike_magnitude_db: float
+  ├─ devices: {"light": {on, power_w}, "fan": {on, power_w}}
+  ├─ baselines: {audio_mean_db, audio_std_db, typical_occupancy,
+  │              power_idle_lamp_w, power_idle_fan_w, calibrated}
+  ├─ scene_description: str          # written by Observer
+  ├─ activity_summary: str           # written by Observer
+  ├─ mood: "quiet"|"active"|"transitional"  # written by Observer
+  └─ recent_events: list[dict]       # last 50 events (serialized)
+```
+
+**Internal state tracking:** WorldState maintains `_entity_memo` (keyed
+by track_id) to track `first_seen` timestamps and previous center
+positions across ticks. This lets it compute `velocity_px_per_s` and
+`seconds_in_frame` without asking the EventDetector. Memos are pruned
+when tracks leave.
+
+**Thread safety:** Single `threading.Lock`. All public methods acquire
+it. `snapshot*()` returns deep copies so callers never hold references
+to live data. The lock is held briefly (no I/O inside it).
+
 ---
 
 ## Zone-map assumptions (load-bearing for accuracy)
@@ -342,7 +436,7 @@ re-captured** via `python -m perception.zone_map` (walkthrough in
 
 ---
 
-## Runtime threads (currently — Block 8)
+## Runtime threads (currently — Block 7)
 
 ```
 ┌── MainThread ──────────── main.py loop: tick() both detectors, merge events,
@@ -350,10 +444,16 @@ re-captured** via `python -m perception.zone_map` (walkthrough in
 ├── camera-capture ──────── cv2.VideoCapture.read() → _latest_frame, buffer
 ├── yolo-engine ─────────── pulls latest_frame, runs model.track, publishes
 ├── [PortAudio callback] ── sounddevice-managed: appends audio chunks, dB
-└── audio-classify ──────── YAMNet every 500ms → smoothing → events
+├── audio-classify ──────── YAMNet every 500ms → smoothing → events
+├── kasa-loop ───────────── asyncio event loop (daemon); receives coroutines
+│                            from main thread via run_coroutine_threadsafe
+├── plug-discover ───────── one-shot thread: runs PlugManager.discover(),
+│                            exits after both plugs found (or timeout)
+└── [kasa poll task] ─────── asyncio Task inside kasa-loop: calls device.update()
+                              every 5 s, writes PlugState into _states dict
 ```
 
-No IPC, no queues, no async — just shared state behind locks. Keep it this way until we *need* something more.
+No IPC, no queues between the synchronous layers — just shared state behind locks. The kasa layer is the exception: it needs asyncio because python-kasa is async-only, so it lives in its own event loop with a thread-safe bridge (`run_coroutine_threadsafe`).
 
 ---
 

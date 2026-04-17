@@ -18,7 +18,7 @@ The full architecture and build plan is in `ARCHITECTURE_AND_BUILD_PLAN copy.md`
 
 ## Status
 
-Greenfield project, planning phase. The architecture document is a **working plan, not a spec**: the three-tier shape (local perception → fast description → deep reasoning) and the two-beat rhythm are the load-bearing ideas; most specifics (event type names, thresholds, routing rules, cost numbers, timelines, dashboard layout) are first-draft placeholders that will be rewritten as we discover how things actually behave. When something changes materially during implementation, update the doc so it stays accurate.
+Day 2 in progress. Layer 0 (perception) is fully implemented and tested. Day 2 Block 1 (WorldState) is complete — the shared in-memory model that aggregates all sensor data is wired into the main loop. Next: calibration (Block 2), Observer/Gemini (Block 3), Reasoner/Claude (Block 4), TTS (Block 5), decisions (Block 6). The architecture document is a **working plan, not a spec**: the three-tier shape (local perception → fast description → deep reasoning) and the two-beat rhythm are the load-bearing ideas; most specifics are first-draft placeholders that get rewritten as we discover how things actually behave.
 
 ## Architecture
 
@@ -45,11 +45,11 @@ main.py            # Orchestrator: starts all layers, manages lifecycle
 ## Tech Stack
 
 - **Python** — core runtime (async, event-driven)
-- **Ultralytics YOLO v8/v11** — detection, tracking, pose estimation
+- **Ultralytics YOLO26n-pose** — detection, tracking (BoT-SORT), pose estimation (17 COCO keypoints)
 - **sounddevice + TensorFlow/YAMNet** — audio monitoring and classification (521 AudioSet classes)
 - **python-kasa** — TP-Link Kasa KP125M smart plug control + energy monitoring
-- **google-generativeai** — Gemini 2.0 Flash (Layer 1 observer)
-- **anthropic** — Claude Sonnet (Layer 2 reasoner)
+- **google-genai** — Gemini 2.5 Flash (Layer 1 observer). Migrating from deprecated `google-generativeai`; Gemini 2.0 Flash shutting down June 2026.
+- **anthropic** — Claude Sonnet 4.6 (Layer 2 reasoner)
 - **edge-tts or pyttsx3** — text-to-speech
 - **FastAPI** — backend server with WebSocket support
 - **Next.js + React + Tailwind + Recharts** — dashboard (Streamlit as fallback)
@@ -59,7 +59,7 @@ main.py            # Orchestrator: starts all layers, manages lifecycle
 - **Event-driven, not polling:** API calls fire only on meaningful YOLO/audio events + periodic 30-60s background refreshes. Combined with hybrid Reasoner routing, this keeps cost low (~$0.10-0.26/hr with Reasoner enabled, ~$0.01/hr without).
 - **Hybrid Reasoner routing:** The Reasoner is NOT called on every Observer call — only on must-escalate event types or when the Observer flags `escalate=true`. This preserves the Observer's role as fast triage and prevents the architecture from collapsing into "two models called sequentially on everything."
 - **Two-beat rhythm:** Beat 1 (Gemini, fast factual) plays immediately so the system feels responsive. Beat 2 (Claude, deep reasoning) follows ~2-3s later with judgment and actions.
-- **Learned baselines:** 5-10 min calibration phase at startup learns the room's normal audio floor, power profile, occupancy pattern, and persistent YAMNet classes to suppress.
+- **Learned baselines:** ~30 s calibration phase at startup learns the room's normal audio floor, power profile, occupancy pattern, and persistent YAMNet classes to suppress. (Reduced from original 5–10 min estimate — 30 s gives enough samples for all baselines.)
 - **Reasoner is disableable:** During development, run Layer 0 + Observer only to save cost. Enable Reasoner for integration testing and demo.
 - **YAMNet temporal smoothing:** Audio class must persist >= 2 consecutive windows before reporting, to avoid spurious classifications.
 
