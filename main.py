@@ -44,6 +44,8 @@ from agents.baselines import CalibrationCollector
 from agents.world_state import WorldState
 from agents.observer import Observer, ObserverWorker
 from agents.routing import should_call_reasoner
+from server.app import run_server_in_thread
+from server.broadcaster import broadcaster
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +81,11 @@ def _fmt_event(ev: Event) -> str:
         return f"speech_start conf={p.get('confidence', 0):.2f} db={p.get('db_level', 0):.1f}"
     if ev.type == "speech_end":
         return f"speech_end   duration={p.get('duration_seconds', 0):.1f}s"
+    if ev.type == "beat_1":
+        narration = p.get("narration", "")
+        if len(narration) > 62:
+            narration = narration[:59] + "..."
+        return f"[Beat 1] {narration}"
     return f"{ev.type} id={ev.track_id} payload={p}"
 
 
@@ -98,6 +105,7 @@ _LOG_FG = {
     "speech_start":        (200, 200,   0),
     "speech_end":          (200, 200,   0),
     "plug_power":          (180, 255, 180),
+    "beat_1":              (255, 255, 255),
 }
 _STATUS_FG = (255, 255, 255)
 _LOG_MAX_LINES = 10
@@ -192,6 +200,12 @@ def main() -> None:
     print("=" * 60)
     print("  Newton-for-a-Room — Layer 0 smoke test (Block 8)")
     print("=" * 60)
+
+    # Start the dashboard server early so it can serve /config and a warm-up
+    # MJPEG stream (just placeholder frames) while the rest of the pipeline
+    # boots. Any publish_* calls before a client connects are no-ops.
+    run_server_in_thread(host="127.0.0.1", port=8000)
+    print("  Dashboard:          http://127.0.0.1:8000")
     print(f"  Camera index:       {config.CAMERA_INDEX}")
     print(f"  Audio device:       {config.AUDIO_DEVICE_NAME}")
     print(f"  Zones loaded:       {list(config.ZONES.keys()) or '(none)'}")
@@ -371,6 +385,14 @@ def main() -> None:
     log.info("Entering main loop — all Layer 0 systems active")
     print()
 
+    # Throttles for the dashboard publishers.
+    # - Snapshots at 10 Hz is plenty for UI (entities, audio dB, devices).
+    # - Frames at 15 FPS balances smoothness vs. encode cost.
+    last_snapshot_publish = 0.0
+    last_frame_publish = 0.0
+    SNAPSHOT_INTERVAL_S = 0.1
+    FRAME_INTERVAL_S = 1.0 / 15.0
+
     try:
         while not shutdown:
             # --- Tick YOLO event detector ---
@@ -387,6 +409,15 @@ def main() -> None:
                 recent_events.append((elapsed, ev))
                 event_counts[ev.type] = event_counts.get(ev.type, 0) + 1
                 print(f"  [event] t={elapsed:6.2f}s  {_fmt_event(ev)}")
+                # Dashboard: one message per event, as they fire.
+                broadcaster.publish_event({
+                    "type": ev.type,
+                    "ts": ev.ts,
+                    "elapsed": round(elapsed, 2),
+                    "track_id": ev.track_id,
+                    "zones": list(ev.zones) if ev.zones else [],
+                    "payload": dict(ev.payload) if ev.payload else {},
+                })
 
             # Keep the recent list bounded
             if len(recent_events) > 50:
@@ -401,6 +432,12 @@ def main() -> None:
                 world.update_devices(plugs)
             for ev in all_events:
                 world.push_event(ev)
+
+            # --- Dashboard: publish WorldState snapshot (throttled) ---
+            now = time.monotonic()
+            if now - last_snapshot_publish >= SNAPSHOT_INTERVAL_S:
+                broadcaster.publish_snapshot(world.snapshot())
+                last_snapshot_publish = now
 
             # --- Feed events to Observer (Layer 1) ---
             if config.OBSERVER_ENABLED and all_events:
@@ -425,7 +462,17 @@ def main() -> None:
                     escalate = obs_result.get("escalate", False)
 
                     # Print Beat 1 narration
-                    print(f"  \033[94m[BEAT 1]\033[0m {narration}")
+                    print(f"  [BEAT 1] {narration}")
+
+                    # Dashboard: push Observer narration + JSON output.
+                    broadcaster.publish_narration("observer", {
+                        "narration": narration,
+                        "escalate": escalate,
+                        "escalate_reason": obs_result.get("escalate_reason", ""),
+                        "world_state_update": obs_result.get("world_state_update", {}),
+                        "trigger_events": list(obs_event_types),
+                        "ts": time.time(),
+                    })
 
                     # Append to the recent_events overlay as a special entry
                     beat1_elapsed = time.monotonic() - t_start
@@ -444,7 +491,8 @@ def main() -> None:
                         obs_event_types[0] if obs_event_types
                         else "periodic_refresh"
                     )
-                    if should_call_reasoner(primary_event_type, obs_result):
+                    fired = should_call_reasoner(primary_event_type, obs_result)
+                    if fired:
                         log.info(
                             "Routing → Reasoner (trigger=%s, escalate=%s, "
                             "reason=%s)",
@@ -457,6 +505,15 @@ def main() -> None:
                             "Routing → Beat 1 only (trigger=%s, escalate=%s)",
                             primary_event_type, escalate,
                         )
+                    # Dashboard: show routing decision in the Reasoner panel
+                    # even before Claude is wired, so the UI isn't dead.
+                    broadcaster.publish_routing({
+                        "trigger": primary_event_type,
+                        "fired": fired,
+                        "escalate": escalate,
+                        "reason": obs_result.get("escalate_reason", ""),
+                        "ts": time.time(),
+                    })
 
             # --- Render video overlay ---
             # Always update last_display_frame when we have a new annotated result,
@@ -468,6 +525,18 @@ def main() -> None:
                 )
             if last_display_frame is not None:
                 cv2.imshow("Newton-for-a-Room  (q=quit)", last_display_frame)
+
+                # Dashboard: encode + publish JPEG at ~15 FPS for MJPEG.
+                # Not gated on has_clients() because MJPEG viewers connect
+                # via HTTP (not WS) and aren't counted there.
+                if now - last_frame_publish >= FRAME_INTERVAL_S:
+                    ok, buf = cv2.imencode(
+                        ".jpg", last_display_frame,
+                        [cv2.IMWRITE_JPEG_QUALITY, 70],
+                    )
+                    if ok:
+                        broadcaster.publish_frame(buf.tobytes())
+                        last_frame_publish = now
 
             # --- Periodic status line (every 2 seconds) ---
             now = time.monotonic()

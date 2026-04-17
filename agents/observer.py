@@ -33,7 +33,6 @@ Output contract (JSON):
     "world_state_update": {
       "scene_description": "one-line scene summary",
       "activity_summary": "what person(s) are doing",
-      "mood": "quiet | active | transitional"
     },
     "escalate": true | false,
     "escalate_reason": "short string — why escalate / why not"
@@ -41,6 +40,69 @@ Output contract (JSON):
 
 The `escalate` flag drives the hybrid routing policy — see agents/routing.py
 and ARCHITECTURE_AND_BUILD_PLAN copy.md Section 2.5.
+
+---------------------------------------------------------------------------
+Observer → Reasoner contract (read this before implementing the Reasoner)
+---------------------------------------------------------------------------
+
+The Reasoner receives three things per call:
+  1. The Observer's JSON output (narration, world_state_update, escalate,
+     escalate_reason)
+  2. The WorldState snapshot — entities, audio, recent_events, baselines
+  3. The trigger event types that caused this Observer call
+
+What the narration represents
+------------------------------
+- 1–2 sentences describing the most notable CHANGE since the last Observer
+  call. Action-first, present-tense, written to be spoken aloud.
+- "Room unchanged. [brief state]" is an explicit signal — the Observer
+  looked and found nothing worth reporting. Not a hedge; treat it as
+  confirmation of stillness.
+- May reference fine visual details Gemini observed directly (phone, mug,
+  glasses, closet door) — these are reliable, not hallucinated, because
+  Gemini is reading frames as primary truth.
+- Never contains raw sensor values (dB, confidence scores, track IDs).
+
+Escalation signal
+------------------
+- escalate=True: Observer judged the event worth deeper reasoning.
+  Typical triggers: occupancy change (someone arrived/left), unusual sound
+  with visual correlation, person interacting with door, ambiguous or
+  potentially concerning activity.
+- escalate=False: routine activity, minor movement, "room unchanged".
+- escalate_reason: short advisory string — a hint to start from, not a
+  verdict. The Reasoner should weigh it against the full WorldState.
+
+Known limitations the Reasoner must account for
+-------------------------------------------------
+1. Track ID churn — BoT-SORT re-IDs the same physical person across
+   multiple track IDs within one session (IDs climb into the 20s–50s
+   over a few minutes with 2–3 people). new_person / lost_person events
+   are frequent and often do NOT represent a real arrival or departure.
+   Use the narration content (did Gemini say "a new person entered"?) as
+   the authoritative signal for real occupancy changes — not the raw event
+   type alone.
+
+2. Frame lag — Gemini's narration describes frames from 0–3 seconds before
+   the API call returned. Fast-moving events (someone walking through the
+   door) may be slightly stale by the time the Reasoner sees the output.
+
+3. Occupancy discrepancy — Gemini's people count (from frames) can differ
+   from WorldState entity count (from YOLO tracker). The narration is more
+   reliable for "who is actually present"; the entity list is noisier.
+
+4. Audio false positives — YAMNet misclassifies ~20–30% of windows,
+   especially Knock and Door at low dB. Narrations that mention BOTH an
+   audio class AND a matching visual observation are high-confidence.
+   Audio-only narrations ("a door sound was heard, no visual change")
+   are lower confidence — the Reasoner should not act on audio alone
+   without corroborating context.
+
+5. Missed departures — If a person leaves quickly (< 2s near the door),
+   the Observer may narrate "room unchanged" rather than catching the
+   departure. The Reasoner should cross-check lost_person events in
+   WorldState recent_events against the narration before concluding no
+   change occurred.
 """
 
 from __future__ import annotations
@@ -60,6 +122,8 @@ from google.genai import types
 import config
 from agents.world_state import WorldState
 from perception.camera import CameraCapture
+from perception.event_detector import EVENT_TYPES as YOLO_EVENT_TYPES
+from perception.audio import AUDIO_EVENT_TYPES
 
 log = logging.getLogger(__name__)
 
@@ -70,48 +134,65 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """\
-You are the Observer — a fast, factual room monitoring agent. You receive \
-camera frames and structured sensor data from a room. Your job is to describe \
-what just happened in a short, natural sentence.
+<identity>
+You are the Observer in a physical AI room agent. You receive camera frames \
+and audio state. Camera frames are your primary source of truth — use them \
+to determine what has changed. Audio state provides context you cannot see. \
+Describe the most notable CHANGE since your last observation.
+</identity>
 
-SIGNAL RELIABILITY — the structured events you receive are from computer vision \
-and audio classifiers. They are useful but noisy. Always verify against the \
-camera frames before narrating:
-- zone_transition: most reliable. Occasionally false-positive at zone boundaries.
-- pose_change: often correct but frequently fires false transitions, especially \
-  at the sitting/standing boundary. If the camera shows no visible change in \
-  posture, ignore the event.
-- new_person / lost_person: pre-filtered for phantoms, but still occasionally \
-  wrong. If new_person fires but the camera shows no one new, or lost_person \
-  fires but the person is clearly still visible, trust the camera.
-- Audio classes (YAMNet): conservative — many more false negatives than false \
-  positives. When a class IS reported, it is usually correct. Speech detection \
-  is highly reliable. Trust reported audio classes, but do not assume silence \
-  means nothing happened — the classifier often misses quiet or brief sounds.
-- Audio spikes: reliable loudness signal, but fires on mundane sounds too \
-  (chair scrape, AC). If the camera shows nothing noteworthy, say so.
+<rules>
+1. Start narrations with an action verb describing what CHANGED: \
+"Someone stood up...", "A knock was heard...", "The person moved to..."
+2. One sentence, occasionally two. Written to be spoken aloud.
+3. If nothing meaningful changed, one short sentence only: \
+"Room unchanged. One person at the desk."
+4. Never expose raw sensor values (dB numbers, confidence scores, track IDs) \
+or internal event type names.
+5. Set escalate=true ONLY for: occupancy change, unusual or ambiguous \
+activity, potential security concern.
+</rules>
 
-RULES:
-1. Be factual. Describe what you SEE in the frames, using the sensor data as \
-supporting context. Do not interpret intent, judge mood, or reason about why.
-2. Be brief. One sentence, occasionally two. Written to be spoken aloud.
-3. If nothing meaningful changed since the last observation, say so briefly: \
-"Room unchanged. One person at desk."
-4. Set escalate=true ONLY when the event likely needs deeper reasoning: \
-occupancy change, unusual or ambiguous activity, potential security concern, \
-or anything a thoughtful system should evaluate further. Routine pose \
-adjustments and quiet-room refreshes do NOT need escalation.
-
-OUTPUT FORMAT — respond with ONLY this JSON, no markdown fences, no extra text:
+<output_format>
+Respond with ONLY this JSON. No markdown fences. No extra text.
 {
-  "narration": "short factual description",
+  "narration": string,
   "world_state_update": {
-    "scene_description": "one-line scene summary",
-    "activity_summary": "what the person(s) are doing"
+    "scene_description": string,
+    "activity_summary": string
   },
-  "escalate": false,
-  "escalate_reason": "brief reason"
+  "escalate": boolean,
+  "escalate_reason": string
 }
+</output_format>
+
+<examples>
+Good — visual motion detected (person walked to door):
+{"narration": "Someone stood up from the desk and walked toward the door.", \
+"world_state_update": {"scene_description": "Person moving toward door", \
+"activity_summary": "walking toward door"}, "escalate": true, \
+"escalate_reason": "possible departure"}
+
+Bad — same trigger:
+{"narration": "A person is standing near the door, facing forward.", ...}
+Why bad: static state, no change described.
+
+Good — periodic refresh, no events:
+{"narration": "Room unchanged. One person at the desk.", \
+"world_state_update": {"scene_description": "One person at desk", \
+"activity_summary": "sitting at desk"}, "escalate": false, \
+"escalate_reason": "no change"}
+
+Bad — same trigger:
+{"narration": "A person is sitting at the desk. The room is quiet. No audio detected.", ...}
+Why bad: too verbose, lists sensor state.
+
+Good — audio: unusual sound heard (Knock):
+{"narration": "A loud knock was heard.", \
+"world_state_update": {"scene_description": "Person at desk, knock detected", \
+"activity_summary": "sitting, reacting to knock"}, "escalate": true, \
+"escalate_reason": "unusual sound"}
+</examples>
 """
 
 
@@ -165,8 +246,8 @@ class Observer:
         if not config.OBSERVER_ENABLED:
             return None
 
-        # 1. Snapshot the world state (thread-safe deep copy)
-        snapshot = self._world.snapshot_for_observer()
+        # 1. Snapshot audio state — Gemini reads visual state from the frames
+        audio_snapshot = self._world.snapshot_audio_only()
 
         # 2. Gather image parts — images go FIRST in the contents array
         #    (Google best practice: put images before the text prompt).
@@ -201,7 +282,7 @@ class Observer:
                     frames_sent += 1
 
         # 3. Build the text prompt (goes AFTER images)
-        prompt_text = self._build_prompt(snapshot, trigger_events, frames_sent)
+        prompt_text = self._build_prompt(audio_snapshot, trigger_events, frames_sent)
         parts.append(types.Part.from_text(text=prompt_text))
 
         # 4. Call Gemini
@@ -213,7 +294,7 @@ class Observer:
                     system_instruction=_SYSTEM_PROMPT,
                     response_mime_type="application/json",
                     temperature=0.3,
-                    max_output_tokens=300,
+                    max_output_tokens=500,
                     thinking_config=types.ThinkingConfig(
                         thinking_budget=config.OBSERVER_THINKING_BUDGET,
                     ),
@@ -224,14 +305,14 @@ class Observer:
             log.warning("Observer Gemini call failed: %s", exc)
             self._consecutive_failures += 1
             self._backoff_if_needed()
-            return self._fallback_output(trigger_events, snapshot)
+            return None
 
         # 5. Parse the JSON response
         output = self._parse_response(raw)
         if output is None:
             log.warning("Observer: invalid JSON from Gemini: %.200s", raw)
             self._consecutive_failures += 1
-            return self._fallback_output(trigger_events, snapshot)
+            return None
 
         # 6. Success — reset failure counter, apply world state update
         self._consecutive_failures = 0
@@ -275,28 +356,52 @@ class Observer:
 
     def _build_prompt(
         self,
-        snapshot: dict,
+        audio_snapshot: dict,
         trigger_events: list[dict],
         n_frames: int,
     ) -> str:
-        """Assemble the per-call user prompt from sensor data and events."""
+        """Assemble the per-call user prompt from audio state and trigger type."""
         lines: list[str] = []
 
-        # What triggered this call
-        if trigger_events:
-            lines.append("TRIGGER: The following events just occurred:")
-            for ev in trigger_events:
-                payload_str = json.dumps(ev.get("payload", {}))
-                lines.append(f"  - {ev['type']}: {payload_str}")
+        # Partition events: YOLO events are triggers only; audio events carry
+        # information Gemini cannot perceive from the frames.
+        yolo_events = [e for e in trigger_events if e["type"] in YOLO_EVENT_TYPES]
+        audio_events = [e for e in trigger_events if e["type"] in AUDIO_EVENT_TYPES]
+
+        # TRIGGER section
+        if not trigger_events:
+            lines.append(
+                "TRIGGER: Periodic background refresh — "
+                "describe what you currently observe."
+            )
         else:
-            lines.append("TRIGGER: Periodic background refresh (no specific event).")
+            if yolo_events:
+                lines.append(
+                    "TRIGGER: Visual change detected — "
+                    "compare these frames to your last observation."
+                )
+            if audio_events:
+                header = "AUDIO EVENTS also detected:" if yolo_events else "TRIGGER: Audio event(s) detected:"
+                lines.append(header)
+                for ev in audio_events:
+                    t = ev["type"]
+                    p = ev.get("payload", {})
+                    if t == "unusual_sound_class":
+                        lines.append(f"  - Unusual sound heard: {p.get('class_name', 'unknown')}")
+                    elif t == "audio_spike":
+                        lines.append("  - Sudden loud sound detected.")
+                    elif t == "speech_start":
+                        lines.append("  - Speech has begun.")
+                    elif t == "speech_end":
+                        dur = p.get("duration_seconds")
+                        lines.append(f"  - Speech ended (lasted {dur:.1f}s)." if dur else "  - Speech ended.")
 
-        # Structured sensor data
+        # Audio state — the only sensor context Gemini cannot derive from frames
         lines.append("")
-        lines.append("SENSOR STATE:")
-        lines.append(json.dumps(snapshot, indent=2, default=str))
+        lines.append("AUDIO STATE:")
+        lines.append(json.dumps(audio_snapshot, indent=2, default=str))
 
-        # Note about attached frames
+        # Frame attachment note
         lines.append("")
         lines.append(f"ATTACHED: {n_frames} camera frame(s) — most recent first.")
         if n_frames == 2:
@@ -316,6 +421,8 @@ class Observer:
 
         Returns the parsed dict if valid, or None if we can't parse it.
         """
+        if not raw_text:
+            return None
         # First try direct parse
         try:
             data = json.loads(raw_text)
@@ -344,44 +451,6 @@ class Observer:
         data["escalate"] = bool(data["escalate"])
 
         return data
-
-    def _fallback_output(
-        self,
-        trigger_events: list[dict],
-        snapshot: dict,
-    ) -> dict:
-        """Generate a minimal deterministic narration from sensor data.
-
-        Used when Gemini fails (timeout, bad JSON, API down).  Ensures the
-        pipeline never stalls — the Reasoner routing still has something to
-        evaluate, and a narration (even a basic one) is produced.
-        """
-        people = snapshot.get("people_count", 0)
-
-        if trigger_events:
-            event_types = [e["type"] for e in trigger_events]
-            narration = (
-                f"Event detected: {', '.join(event_types)}. "
-                f"{people} person(s) in room."
-            )
-        else:
-            narration = f"Room status: {people} person(s) detected."
-
-        # Conservative escalation: only escalate for must-escalate event types
-        should_escalate = any(
-            e["type"] in config.REASONER_ALWAYS for e in trigger_events
-        )
-
-        return {
-            "narration": narration,
-            "world_state_update": {},
-            "escalate": should_escalate,
-            "escalate_reason": (
-                "fallback — Gemini unavailable"
-                if should_escalate
-                else "fallback, no escalation needed"
-            ),
-        }
 
     def _backoff_if_needed(self) -> None:
         """Sleep briefly after consecutive failures (exponential backoff).
@@ -428,6 +497,7 @@ class ObserverWorker:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._last_refresh_time: float = time.monotonic()
+        self._last_call_time: float = 0.0
 
     def start(self) -> None:
         """Start the background worker thread."""
@@ -445,6 +515,22 @@ class ObserverWorker:
             self._thread.join(timeout=3.0)
             log.info("ObserverWorker thread stopped")
 
+    @staticmethod
+    def _is_significant(event: dict) -> bool:
+        """Return True if this event should trigger an Observer call.
+
+        pose_change is filtered to sitting↔walking only — standing↔walking
+        transitions are too noisy and produce low-value narrations.
+        All other event types pass through unchanged.
+        """
+        if event["type"] != "pose_change":
+            return True
+        p = event.get("payload", {})
+        from_pose = p.get("from_pose", "")
+        to_pose = p.get("to_pose", "")
+        significant_pair = {"sitting", "walking"}
+        return {from_pose, to_pose} == significant_pair
+
     def push_events(
         self,
         events: list[dict],
@@ -455,8 +541,11 @@ class ObserverWorker:
         Called from the main thread whenever Layer 0 events fire.  The frame
         is the current camera capture — we keep only the most recent one.
         """
+        significant = [e for e in events if self._is_significant(e)]
+        if not significant:
+            return
         with self._lock:
-            self._pending_events.extend(events)
+            self._pending_events.extend(significant)
             if frame is not None:
                 self._pending_frame = frame
         self._wake.set()
@@ -511,14 +600,27 @@ class ObserverWorker:
             if not events and not is_refresh:
                 continue
 
+            # Rate-limit: enforce minimum interval between Gemini calls.
+            # Events that arrive during this wait accumulate in _pending_events
+            # and get batched into the next call — nothing is dropped.
+            since_last = time.monotonic() - self._last_call_time
+            gap = config.OBSERVER_MIN_CALL_INTERVAL_S - since_last
+            if gap > 0:
+                if self._stop.wait(gap):
+                    break
+
             # Record the event types for routing (before calling Observer)
             event_types = [e["type"] for e in events]
 
-            # Call Observer (synchronous — blocks until Gemini responds)
-            result = self._observer.call(events, frame)
+            try:
+                # Call Observer (synchronous — blocks until Gemini responds)
+                self._last_call_time = time.monotonic()
+                result = self._observer.call(events, frame)
 
-            if result is not None:
-                self._result = (result, event_types)
-                self._result_ready.set()
+                if result is not None:
+                    self._result = (result, event_types)
+                    self._result_ready.set()
+            except Exception as exc:
+                log.warning("ObserverWorker: unhandled exception in call: %s", exc)
 
             self._last_refresh_time = time.monotonic()

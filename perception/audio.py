@@ -290,6 +290,7 @@ class AudioMonitor:
         self._speech_active: bool = False
         self._speech_start_ts: float = 0.0
         self._speech_off_streak: int = 0
+        self._speech_on_streak: int = 0
         self._last_spike_ts: float = 0.0
         self._last_classify_ms: float = 0.0
 
@@ -527,15 +528,20 @@ class AudioMonitor:
                     ))
 
         # --- Speech transitions ---
-        # Longer off-threshold: 4 windows (2s) to ride through natural
-        # pauses between sentences without flipping speech_end/speech_start.
+        # On-threshold: 4 windows (2s) of sustained speech before firing
+        # speech_start, so brief utterances (a cough, a single word) don't
+        # trigger a full speech event.
+        # Off-threshold: 4 windows (2s) to ride through natural pauses
+        # between sentences without flipping speech_end/speech_start.
+        _SPEECH_ON_WINDOWS = 4
         _SPEECH_OFF_WINDOWS = 4
 
         speech_reported = bool(self._reported_classes & self._valid_speech)
 
         if speech_reported:
             self._speech_off_streak = 0
-            if not self._speech_active:
+            self._speech_on_streak += 1
+            if not self._speech_active and self._speech_on_streak >= _SPEECH_ON_WINDOWS:
                 self._speech_active = True
                 self._speech_start_ts = ts
                 best_speech_conf = max(
@@ -552,7 +558,9 @@ class AudioMonitor:
                         "db_level": round(current_db, 1),
                     },
                 ))
-        elif self._speech_active:
+        else:
+            self._speech_on_streak = 0
+        if not speech_reported and self._speech_active:
             self._speech_off_streak += 1
             if self._speech_off_streak >= _SPEECH_OFF_WINDOWS:
                 self._speech_active = False

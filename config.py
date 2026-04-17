@@ -105,10 +105,12 @@ EVENT_POSE_KP_MIN_CONF = 0.5
 EVENT_POSE_HYSTERESIS_FRAMES = 8     # ~0.27s at 30 FPS
 EVENT_ZONE_DWELL_FRAMES = 5          # ~0.17s — ignore drive-by boundary crosses
 EVENT_NEW_PERSON_CONFIRM_FRAMES = 10 # ~0.33s — track must persist before new_person fires
-EVENT_LOST_PERSON_GRACE_FRAMES = 30  # ~1.0s — tracker occlusion tolerance
+EVENT_LOST_PERSON_GRACE_FRAMES = 60  # ~2.0s — tracker occlusion tolerance
 EVENT_WALK_MIN_DIST_PX = 8           # per-frame 2D center-point distance threshold
 EVENT_WALK_HOLD_FRAMES = 15          # ~0.5s — stay "walking" through brief pauses
 EVENT_SIT_HOLD_FRAMES = 5            # ~0.17s — stay "sitting" through brief jitter
+EVENT_POSE_COOLDOWN_S = 3.0          # max 1 pose_change per 3s per track (catch-up on expiry)
+EVENT_ZONE_COOLDOWN_S = 2.0          # max 1 zone_transition per 2s per track (catch-up on expiry)
 
 # -- Baselines / calibration --
 CALIBRATION_SECONDS = 30               # ~30s gives enough samples (see LEARNING.md)
@@ -126,9 +128,7 @@ CALIBRATION_EXCLUDE_SPEECH_FROM_FLOOR = True  # skip speech dB from noise floor 
 #     python -m perception.zone_map
 # It prints a ready-to-paste ZONES block. See SETUP.md §4c for the walkthrough.
 ZONES: dict[str, list[tuple[int, int]]] = {
-    "door": [(1009, 347), (909, 386), (1037, 505), (1184, 421)],
-    "desks": [(141, 710), (953, 710), (598, 427), (116, 422)],
-    "closet": [(718, 383), (780, 451), (1025, 370), (960, 322)],
+    "door": [(964, 338), (875, 373), (1008, 469), (1112, 398)],
 }
 
 # -- LLM toggles (useful during dev) --
@@ -138,8 +138,9 @@ REASONER_ENABLED = True   # Claude Sonnet (Beat 2) — disable to save cost
 # -- Observer (Gemini) settings --
 GEMINI_MODEL = "gemini-2.5-flash"       # swap to "gemini-2.5-flash-lite" for cheaper/faster
 OBSERVER_THINKING_BUDGET = 0            # 0 = disable thinking for low-latency factual descriptions
-OBSERVER_REFRESH_INTERVAL_S = 15        # background refresh during quiet periods
-OBSERVER_DEBOUNCE_S = 0.15             # batch events within this window before calling Gemini
+OBSERVER_REFRESH_INTERVAL_S = 30        # background refresh during quiet periods
+OBSERVER_DEBOUNCE_S = 0.5             # batch events within this window before calling Gemini
+OBSERVER_MIN_CALL_INTERVAL_S = 2.0    # minimum seconds between Gemini calls (rate limiting)
 OBSERVER_TIMEOUT_S = 8.0               # max wait for Gemini response before giving up
 OBSERVER_MAX_FRAMES = 3                # how many frames to send (current + N-1 prior)
 OBSERVER_FRAME_QUALITY = 70            # JPEG quality for frame encoding (lower = smaller = cheaper)
@@ -151,7 +152,6 @@ OBSERVER_FRAME_MAX_DIM = 1280          # raw camera res (1280×720 = 2 tiles = 5
 REASONER_ALWAYS: set[str] = {
     "new_person",
     "lost_person",
-    "unusual_sound_class",    # glass_break, alarm, scream, etc.
     "power_anomaly",
     "security_event",
     "periodic_refresh_hourly",  # guaranteed hourly full-reasoning pass

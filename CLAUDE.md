@@ -18,7 +18,7 @@ The full architecture and build plan is in `ARCHITECTURE_AND_BUILD_PLAN copy.md`
 
 ## Status
 
-Day 2 in progress. Layer 0 (perception) is fully implemented and tested. Day 2 Blocks 1-3 complete — WorldState, CalibrationCollector, and Observer (Gemini 2.5 Flash) are wired into the main loop. Observer runs in a background thread with event batching (0.5s debounce) and 45s periodic refresh; produces Beat 1 narrations and escalation decisions. Migrated to `google-genai` SDK (from deprecated `google-generativeai`). Next: Reasoner/Claude (Block 4), TTS (Block 5), decisions (Block 6). The architecture document is a **working plan, not a spec**: the three-tier shape (local perception → fast description → deep reasoning) and the two-beat rhythm are the load-bearing ideas; most specifics are first-draft placeholders that get rewritten as we discover how things actually behave.
+Day 2 in progress. Layer 0 (perception) is fully implemented and tested. Day 2 Blocks 1-3 complete — WorldState, CalibrationCollector, and Observer (Gemini 2.5 Flash) are wired into the main loop. Observer runs in a background thread with event batching (0.5s debounce) and 30s periodic refresh; produces Beat 1 narrations and escalation decisions. Migrated to `google-genai` SDK (from deprecated `google-generativeai`). Next: Reasoner/Claude (Block 4), TTS (Block 5), decisions (Block 6). The architecture document is a **working plan, not a spec**: the three-tier shape (local perception → fast description → deep reasoning) and the two-beat rhythm are the load-bearing ideas; most specifics are first-draft placeholders that get rewritten as we discover how things actually behave.
 
 ## Architecture
 

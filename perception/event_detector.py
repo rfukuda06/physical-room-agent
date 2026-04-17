@@ -146,6 +146,23 @@ class _TrackState:
     frames_seen: int            # how many frames this track has been present
 
 
+@dataclass
+class _CooldownState:
+    """Per-track cooldown for rate-limiting event emission.
+
+    When an event fires, it starts a cooldown.  Subsequent transitions during
+    the cooldown are suppressed but remembered (pending_value).  When the
+    cooldown expires and the current state differs from the last emitted state,
+    a catch-up event is emitted with the net change.  This compresses jitter
+    (sitting→standing→walking→sitting becomes sitting→sitting = no event)
+    while never losing genuine transitions.
+    """
+    last_emitted_ts: float      # monotonic time of last emitted event
+    last_emitted_value: object  # pose string or zone list at emission
+    pending_value: object       # latest suppressed value, or None
+    pending_conf: float         # detection confidence at time of suppressed event
+
+
 # ---------------------------------------------------------------------------
 # Pose classifier
 # ---------------------------------------------------------------------------
@@ -292,6 +309,8 @@ class EventDetector:
         walk_min_dist_px: float = config.EVENT_WALK_MIN_DIST_PX,
         walk_hold_frames: int = config.EVENT_WALK_HOLD_FRAMES,
         sit_hold_frames: int = config.EVENT_SIT_HOLD_FRAMES,
+        pose_cooldown_s: float = config.EVENT_POSE_COOLDOWN_S,
+        zone_cooldown_s: float = config.EVENT_ZONE_COOLDOWN_S,
     ) -> None:
         # Thresholds are injected so tests can override them without
         # monkey-patching config.
@@ -303,9 +322,15 @@ class EventDetector:
         self._walk_min_dist = walk_min_dist_px
         self._walk_hold = max(1, walk_hold_frames)
         self._sit_hold = max(1, sit_hold_frames)
+        self._pose_cooldown = pose_cooldown_s
+        self._zone_cooldown = zone_cooldown_s
 
         self._tracks: dict[int, _TrackState] = {}
         self._last_processed_ts: float = -1.0
+
+        # Per-track cooldown state for rate-limiting events.
+        self._pose_cd: dict[int, _CooldownState] = {}
+        self._zone_cd: dict[int, _CooldownState] = {}
 
     # ---- stats / introspection (useful for the smoke test and future dashboard) ----
 
@@ -469,17 +494,32 @@ class EventDetector:
             elif raw_pose == state.pending_pose:
                 state.pose_streak += 1
                 if state.pose_streak >= self._pose_hyst:
-                    events.append(Event(
-                        type="pose_change",
-                        ts=ts,
-                        track_id=tid,
-                        zones=zones,
-                        confidence=ent.conf,
-                        payload={
-                            "from_pose": state.last_pose,
-                            "to_pose": raw_pose,
-                        },
-                    ))
+                    # Cooldown gate: suppress if too soon after last emit
+                    cd = self._pose_cd.get(tid)
+                    now_mono = time.monotonic()
+                    if cd is not None and (now_mono - cd.last_emitted_ts) < self._pose_cooldown:
+                        # Within cooldown — remember for catch-up later
+                        cd.pending_value = raw_pose
+                        cd.pending_conf = ent.conf
+                    else:
+                        # Cooldown expired or first event — emit
+                        events.append(Event(
+                            type="pose_change",
+                            ts=ts,
+                            track_id=tid,
+                            zones=zones,
+                            confidence=ent.conf,
+                            payload={
+                                "from_pose": state.last_pose,
+                                "to_pose": raw_pose,
+                            },
+                        ))
+                        self._pose_cd[tid] = _CooldownState(
+                            last_emitted_ts=now_mono,
+                            last_emitted_value=raw_pose,
+                            pending_value=None,
+                            pending_conf=0.0,
+                        )
                     state.last_pose = raw_pose
                     state.pose_streak = 0
             else:
@@ -496,22 +536,93 @@ class EventDetector:
             elif zones == state.pending_zones:
                 state.zone_streak += 1
                 if state.zone_streak >= self._zone_dwell:
-                    events.append(Event(
-                        type="zone_transition",
-                        ts=ts,
-                        track_id=tid,
-                        zones=zones,
-                        confidence=ent.conf,
-                        payload={
-                            "from_zones": state.last_zones,
-                            "to_zones": zones,
-                        },
-                    ))
+                    # Cooldown gate: suppress if too soon after last emit
+                    cd = self._zone_cd.get(tid)
+                    now_mono = time.monotonic()
+                    if cd is not None and (now_mono - cd.last_emitted_ts) < self._zone_cooldown:
+                        # Within cooldown — remember for catch-up later
+                        cd.pending_value = zones
+                        cd.pending_conf = ent.conf
+                    else:
+                        # Cooldown expired or first event — emit
+                        events.append(Event(
+                            type="zone_transition",
+                            ts=ts,
+                            track_id=tid,
+                            zones=zones,
+                            confidence=ent.conf,
+                            payload={
+                                "from_zones": state.last_zones,
+                                "to_zones": zones,
+                            },
+                        ))
+                        self._zone_cd[tid] = _CooldownState(
+                            last_emitted_ts=now_mono,
+                            last_emitted_value=list(zones),
+                            pending_value=None,
+                            pending_conf=0.0,
+                        )
                     state.last_zones = zones
                     state.zone_streak = 0
             else:
                 state.pending_zones = zones
                 state.zone_streak = 1
+
+        # Pass 1b: catch-up emission for expired cooldowns.
+        # If a cooldown has expired and the pending value differs from the
+        # last emitted value, emit the net-change event now.
+        now_mono = time.monotonic()
+
+        for tid, cd in list(self._pose_cd.items()):
+            if (
+                cd.pending_value is not None
+                and (now_mono - cd.last_emitted_ts) >= self._pose_cooldown
+                and cd.pending_value != cd.last_emitted_value
+                and tid in self._tracks
+            ):
+                state = self._tracks[tid]
+                events.append(Event(
+                    type="pose_change",
+                    ts=ts,
+                    track_id=tid,
+                    zones=state.last_zones,
+                    confidence=cd.pending_conf,
+                    payload={
+                        "from_pose": cd.last_emitted_value,
+                        "to_pose": cd.pending_value,
+                    },
+                ))
+                cd.last_emitted_ts = now_mono
+                cd.last_emitted_value = cd.pending_value
+                cd.pending_value = None
+            elif cd.pending_value is not None and (now_mono - cd.last_emitted_ts) >= self._pose_cooldown:
+                # Cooldown expired but pending == last emitted → just clear
+                cd.pending_value = None
+
+        for tid, cd in list(self._zone_cd.items()):
+            if (
+                cd.pending_value is not None
+                and (now_mono - cd.last_emitted_ts) >= self._zone_cooldown
+                and cd.pending_value != cd.last_emitted_value
+                and tid in self._tracks
+            ):
+                state = self._tracks[tid]
+                events.append(Event(
+                    type="zone_transition",
+                    ts=ts,
+                    track_id=tid,
+                    zones=cd.pending_value,
+                    confidence=cd.pending_conf,
+                    payload={
+                        "from_zones": cd.last_emitted_value,
+                        "to_zones": cd.pending_value,
+                    },
+                ))
+                cd.last_emitted_ts = now_mono
+                cd.last_emitted_value = list(cd.pending_value)
+                cd.pending_value = None
+            elif cd.pending_value is not None and (now_mono - cd.last_emitted_ts) >= self._zone_cooldown:
+                cd.pending_value = None
 
         # Pass 2: age out tracks that weren't in this frame. We don't
         # immediately fire lost_person — give the tracker a grace window
@@ -540,6 +651,8 @@ class EventDetector:
                 # they were phantom detections that never persisted long
                 # enough to be reported as new_person.
                 del self._tracks[tid]
+                self._pose_cd.pop(tid, None)
+                self._zone_cd.pop(tid, None)
 
         return events
 

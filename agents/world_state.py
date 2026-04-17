@@ -127,7 +127,6 @@ class WorldState:
         # Semantic state (updated by Observer / Reasoner)
         self._scene_description: str = ""
         self._activity_summary: str = ""
-        self._mood: str = "quiet"
 
         # Baselines (populated by calibration)
         self._baselines: Baselines = Baselines()
@@ -286,8 +285,6 @@ class WorldState:
                 self._scene_description = str(update["scene_description"])
             if "activity_summary" in update:
                 self._activity_summary = str(update["activity_summary"])
-            if "mood" in update:
-                self._mood = str(update["mood"])
 
     def apply_reasoner_update(self, update: dict) -> None:
         """Merge deeper semantic fields from Reasoner."""
@@ -315,6 +312,21 @@ class WorldState:
         """
         with self._lock:
             return self._build_snapshot(include_semantic=False, include_events=False)
+
+    def snapshot_audio_only(self) -> dict:
+        """Audio-only snapshot for the Observer. Gemini reads visual state from frames."""
+        with self._lock:
+            return {
+                "level_db": round(self._audio.level_db, 1),
+                "dominant_class": self._audio.dominant_class,
+                "speech_active": self._audio.speech_active,
+                "recent_spike": self._audio.recent_spike,
+                "spike_magnitude_db": round(self._audio.spike_magnitude_db, 1),
+                "top_classes": [
+                    {"label": label, "confidence": round(conf, 2)}
+                    for label, conf in self._audio.top_classes
+                ],
+            }
 
     def snapshot_for_reasoner(self) -> dict:
         """Full snapshot for the Reasoner, including semantic fields + events."""
@@ -373,7 +385,6 @@ class WorldState:
         if include_semantic:
             snap["scene_description"] = self._scene_description
             snap["activity_summary"] = self._activity_summary
-            snap["mood"] = self._mood
 
         if include_events:
             snap["recent_events"] = copy.deepcopy(self._recent_events)

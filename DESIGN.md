@@ -9,7 +9,7 @@ Legend:
 
 ---
 
-## Current state (Day 2 — end of Block 3)
+## Current state (Day 3 — dashboard Phase 1)
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -197,11 +197,19 @@ Legend:
 │                                                                         │
 │   Graceful shutdown on Ctrl+C or 'q' keypress. Prints event summary.   │
 │                                                                         │
+│   Also publishes everything to the DashboardBroadcaster for the        │
+│   live dashboard (Day 3 Phase 1):                                       │
+│     - publish_event on every merged event                               │
+│     - publish_snapshot (throttled 10 Hz) on world state                 │
+│     - publish_narration on each Observer poll result                    │
+│     - publish_routing on each Reasoner routing decision                 │
+│     - publish_frame (throttled 15 FPS) of the annotated BGR frame       │
+│                                                                         │
 │   NOT YET WIRED (future blocks):                                       │
 │     - Reasoner (Day 2 Block 4)                                          │
 │     - TTS actuator (Day 2 Block 5)                                      │
 │     - Decision logic (Day 2 Block 6)                                    │
-│     - FastAPI server (Day 3)                                            │
+│     - Next.js frontend (Day 3 Phase 3+)                                 │
 └────────────────────────────────────────────────────────────────────────┘
                                     │
 ├────────────────────────────────────────────────────────────────────────┤
@@ -225,7 +233,15 @@ Legend:
 ├────────────────────────────────────────────────────────────────────────┤
 │  🟡 actuators/*.py — (Day 2) TTS speaker + smart_plug wrapper. Stubs.   │
 ├────────────────────────────────────────────────────────────────────────┤
-│  🟡 server/*.py — (Day 3) FastAPI + WebSocket hub. Stubs.               │
+│  ✅ server/broadcaster.py — DashboardBroadcaster (Day 3 Phase 1)        │
+│     Thread-safe fan-out from sync producers (main loop) to async       │
+│     FastAPI consumers (WS + MJPEG). Uses run_coroutine_threadsafe to   │
+│     cross the thread boundary. Per-client asyncio.Queue + drop-oldest  │
+│     backpressure. Latest-JPEG slot with threading.Condition for MJPEG. │
+│  ✅ server/app.py — FastAPI app (Day 3 Phase 1)                         │
+│     Routes: GET /, GET /config, GET /video/stream (MJPEG),             │
+│     WS /ws/state. run_server_in_thread() launches uvicorn on a daemon. │
+│  🟡 server/events.py — separate stub; broadcaster covers this role now. │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -308,8 +324,10 @@ Audio events use the same `Event` dataclass as YOLO events, with
 Speech events fire on *transitions only* — silence→speech emits
 `speech_start`, speech→silence emits `speech_end`.  Continuing speech
 is tracked silently via `AudioState.speech_active`.  Both transitions
-use the same `YAMNET_PERSISTENCE_WINDOWS` hysteresis threshold (2
-windows = 1 s) to avoid flickering on brief pauses.
+use a dedicated 4-window hysteresis (`_SPEECH_ON_WINDOWS` /
+`_SPEECH_OFF_WINDOWS` = 4 × 500 ms = 2 s) so brief utterances (a
+cough, a single word) don't trigger `speech_start`, and natural
+pauses between sentences don't trigger `speech_end`.
 
 `AudioState` snapshot:
 
@@ -508,6 +526,60 @@ prompts can deprioritize them as part of the room's normal sound profile.
 refresh call with empty event list (still sends camera frames).
 **Threading:** single daemon thread. No queue needed — latest result only.
 
+### DashboardBroadcaster (Day 3 Phase 1)
+
+Thread-safe bridge between the synchronous perception loop and the
+asyncio event loop FastAPI lives on. Singleton — import `broadcaster`
+from `server.broadcaster`.
+
+**Producer API (callable from any thread):**
+- `publish_event(dict)` — one Layer 0 event
+- `publish_snapshot(dict)` — `WorldState.snapshot()` output
+- `publish_narration(agent, dict)` — `"observer"` or `"reasoner"`
+- `publish_routing(dict)` — `{trigger, fired, escalate, reason}`
+- `publish_frame(jpeg_bytes)` — pre-encoded MJPEG frame
+
+**Consumer API (inside async handlers):**
+- `register() -> asyncio.Queue` — per-client queue, size 512
+- `unregister(queue)` — remove on disconnect
+- `wait_for_frame(last_seq, timeout) -> (bytes, seq)` — blocks on a
+  `threading.Condition` until a newer frame arrives
+
+**Bridge mechanism:** `bind_loop()` captures the running asyncio loop
+at FastAPI startup. `_broadcast()` uses `asyncio.run_coroutine_threadsafe`
+to put messages onto each client's queue from outside the loop.
+Backpressure: queue full → drop oldest, never block the producer.
+
+### FastAPI app (Day 3 Phase 1)
+
+Endpoints:
+
+| Method | Path            | Purpose                                          |
+|--------|-----------------|--------------------------------------------------|
+| GET    | `/`             | Health check (returns `"ok"`)                    |
+| GET    | `/config`       | One-shot dashboard config (zones, camera, agents)|
+| GET    | `/video/stream` | MJPEG (`multipart/x-mixed-replace`) of annotated frames |
+| WS     | `/ws/state`     | Live fan-out of the four message kinds           |
+
+**WebSocket message shapes** (JSON over `/ws/state`):
+
+```
+{"kind": "snapshot",  "data": <WorldState.snapshot()>}
+{"kind": "event",     "data": {type, ts, elapsed, track_id, zones, payload}}
+{"kind": "narration", "agent": "observer"|"reasoner",
+                      "data": {narration, escalate, escalate_reason,
+                               world_state_update, trigger_events, ts}}
+{"kind": "routing",   "data": {trigger, fired, escalate, reason, ts}}
+```
+
+CORS is open (`*`) during development for the Next.js dev server on
+port 3000. Locked down before anything ships.
+
+**MJPEG generator** uses `loop.run_in_executor(None, wait_for_frame, ...)`
+to bridge the blocking `threading.Condition.wait` into the async loop
+without stalling other requests. Each new frame yields one multipart
+part; no polling, no duplicates.
+
 ---
 
 ## Zone-map assumptions (load-bearing for accuracy)
@@ -547,6 +619,11 @@ re-captured** via `python -m perception.zone_map` (walkthrough in
 │                            from main thread via run_coroutine_threadsafe
 ├── plug-discover ───────── one-shot thread: runs PlugManager.discover(),
 │                            exits after both plugs found (or timeout)
+├── dashboard-server ────── uvicorn asyncio loop (daemon) running FastAPI.
+│                            Receives messages from the main loop via
+│                            DashboardBroadcaster (run_coroutine_threadsafe).
+│                            Serves /video/stream (MJPEG), /ws/state (WS),
+│                            and /config to the dashboard frontend.
 └── [kasa poll task] ─────── asyncio Task inside kasa-loop: calls device.update()
                               every 5 s, writes PlugState into _states dict
 ```
