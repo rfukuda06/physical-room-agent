@@ -9,7 +9,7 @@ Legend:
 
 ---
 
-## Current state (Day 3 — dashboard Phase 1)
+## Current state (Day 3 — dashboard Phases 1–3)
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -575,10 +575,69 @@ Endpoints:
 CORS is open (`*`) during development for the Next.js dev server on
 port 3000. Locked down before anything ships.
 
+**Same-origin proxy via Next.js rewrites:** the dashboard talks to the
+backend through `/backend/:path*` (configured in
+`dashboard/next.config.ts`). Required because browsers refuse to render
+cross-origin `multipart/x-mixed-replace` inside an `<img>` tag even with
+permissive CORS — the rewrite makes the MJPEG stream appear same-origin
+to the browser while Next.js forwards the bytes to port 8000 server-side.
+The WebSocket still connects directly (rewrites are HTTP-only, and WS
+cross-origin works fine).
+
 **MJPEG generator** uses `loop.run_in_executor(None, wait_for_frame, ...)`
 to bridge the blocking `threading.Condition.wait` into the async loop
 without stalling other requests. Each new frame yields one multipart
 part; no polling, no duplicates.
+
+### Dashboard frontend (Day 3 Phase 3)
+
+Next.js 16 (App Router) + React 19 + Tailwind 4. Lives in `dashboard/`,
+run with `npm run dev` on port 3000.
+
+```
+dashboard/
+  app/
+    layout.tsx          Root layout + metadata
+    page.tsx            Grid: [VideoPanel | StatsPanel]  + 3 log teasers
+    globals.css         Tailwind import + forced dark theme
+  lib/
+    api.ts              Backend URLs + TypeScript types mirroring the
+                        WS message shapes in server/broadcaster.py
+    useDashboardStream.ts
+                        Client hook: opens /ws/state, splits messages
+                        into state slices (world, events, observer-
+                        Narrations, reasonerNarrations, routings),
+                        auto-reconnects with 1s delay on disconnect,
+                        also fetches /config on mount
+  components/
+    VideoPanel.tsx      <img src=/video/stream> + SVG zone overlay
+                        (viewBox in camera-pixel coords so it scales
+                        to fit whatever size the video element is) +
+                        corner badges (LIVE, people count, audio dB)
+    StatsPanel.tsx      PeopleCard · AudioCard · DevicesCard ·
+                        BaselinesCard — live-updates via the world
+                        snapshot stream
+    LogShell.tsx        Shared chrome for the three scrolling log
+                        panels: title bar, count badge, fixed-height
+                        scroll viewport (min-h-0 + flex-1 trick).
+    EventLog.tsx        Layer 0 events, newest first, color-coded by
+                        type, formatted via lib/fmt.ts::fmtEvent.
+    ObserverLog.tsx     Past Gemini narrations, escalate/triaged
+                        badge, trigger-event chips.
+    ReasonerLog.tsx     Interleaved stream: Beat-2 narrations (lamp/
+                        fan/alert/speak chips + reasoning line) AND
+                        routing skips (muted "skipped: <trigger> — …"
+                        rows). Fired routings are suppressed because
+                        they'd double-up with the narration entries.
+```
+
+Buffers: events keep the last 200; narrations/routings the last 100.
+Entries are tagged on arrival with `_localId` (monotonic counter,
+stable React key) and `_receivedAt` (browser wall-clock ms, renders
+as HH:MM:SS). Python's monotonic `event.ts` isn't meaningful on the
+client so we use arrival time uniformly across all three log streams.
+The hook bails early on parse errors and is safe to unmount cleanly
+(refs hold the WS handle, cleanup closes it and cancels reconnects).
 
 ---
 

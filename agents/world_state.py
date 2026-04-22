@@ -128,6 +128,11 @@ class WorldState:
         self._scene_description: str = ""
         self._activity_summary: str = ""
 
+        # Reasoner session model — compounds in intelligence over time
+        self._session_narrative: str = ""   # Reasoner's running interpretation of the session
+        self._activity_label: str = "unknown"  # current activity classification
+        self._session_start: float = time.monotonic()
+
         # Baselines (populated by calibration)
         self._baselines: Baselines = Baselines()
 
@@ -287,9 +292,16 @@ class WorldState:
                 self._activity_summary = str(update["activity_summary"])
 
     def apply_reasoner_update(self, update: dict) -> None:
-        """Merge deeper semantic fields from Reasoner."""
-        # Same fields for now; Reasoner may add more later.
-        self.apply_observer_update(update)
+        """Merge deeper semantic fields from Reasoner, including session model."""
+        with self._lock:
+            if "scene_description" in update:
+                self._scene_description = str(update["scene_description"])
+            if "activity_summary" in update:
+                self._activity_summary = str(update["activity_summary"])
+            if update.get("session_narrative"):
+                self._session_narrative = str(update["session_narrative"])
+            if update.get("activity_label"):
+                self._activity_label = str(update["activity_label"])
 
     # ------------------------------------------------------------------
     # Snapshots — deep copies for LLM prompt building
@@ -329,9 +341,13 @@ class WorldState:
             }
 
     def snapshot_for_reasoner(self) -> dict:
-        """Full snapshot for the Reasoner, including semantic fields + events."""
+        """Full snapshot for the Reasoner, including session model + events."""
         with self._lock:
-            return self._build_snapshot(include_semantic=True, include_events=True)
+            snap = self._build_snapshot(include_semantic=True, include_events=True)
+            snap["session_elapsed_s"] = round(time.monotonic() - self._session_start, 1)
+            snap["session_narrative"] = self._session_narrative
+            snap["activity_label"] = self._activity_label
+            return snap
 
     def _build_snapshot(
         self,

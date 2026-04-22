@@ -43,7 +43,10 @@ from perception.plugs import PlugManager
 from agents.baselines import CalibrationCollector
 from agents.world_state import WorldState
 from agents.observer import Observer, ObserverWorker
+from agents.reasoner import Reasoner, ReasonerWorker
+from agents.decisions import DecisionEngine
 from agents.routing import should_call_reasoner
+from actuators.speaker import Speaker
 from server.app import run_server_in_thread
 from server.broadcaster import broadcaster
 
@@ -86,6 +89,11 @@ def _fmt_event(ev: Event) -> str:
         if len(narration) > 62:
             narration = narration[:59] + "..."
         return f"[Beat 1] {narration}"
+    if ev.type == "beat_2":
+        narration = p.get("narration", "")
+        if len(narration) > 62:
+            narration = narration[:59] + "..."
+        return f"[Beat 2] {narration}"
     return f"{ev.type} id={ev.track_id} payload={p}"
 
 
@@ -106,6 +114,7 @@ _LOG_FG = {
     "speech_end":          (200, 200,   0),
     "plug_power":          (180, 255, 180),
     "beat_1":              (255, 255, 255),
+    "beat_2":              (180, 200, 255),  # soft blue for Reasoner
 }
 _STATUS_FG = (255, 255, 255)
 _LOG_MAX_LINES = 10
@@ -118,10 +127,19 @@ def _draw_overlay(
     audio: AudioMonitor,
     plugs: Optional[PlugManager] = None,
 ) -> np.ndarray:
-    """Draw zones, event log, track status, and audio state onto the frame."""
-    out = frame
+    """Draw zone polygons onto the frame.
 
-    # Zone polygons
+    Previously this also burned in an event log, track status, audio
+    status, and plug status. Those all live on the dashboard now
+    (EventLog, StatsPanel, etc.) so the cv2 window stays clean — just
+    YOLO boxes/skeleton (already drawn into annotated_frame by the
+    engine) plus zone polygons for spatial context.
+    `recent_events`, `detector`, `audio`, and `plugs` are kept in the
+    signature so callers don't break; they're unused for now.
+    """
+    del recent_events, detector, audio, plugs  # intentionally unused
+
+    out = frame
     for name, pts in config.ZONES.items():
         if len(pts) < 3:
             continue
@@ -129,60 +147,6 @@ def _draw_overlay(
         cv2.polylines(out, [poly], isClosed=True, color=_ZONE_COLOR, thickness=2)
         cv2.putText(out, name, pts[0], cv2.FONT_HERSHEY_SIMPLEX,
                     0.7, _ZONE_COLOR, 2, cv2.LINE_AA)
-
-    # Rolling event log — top-left, translucent black background
-    if recent_events:
-        h_line = 22
-        n = min(_LOG_MAX_LINES, len(recent_events))
-        box_h = n * h_line + 14
-        overlay = out.copy()
-        cv2.rectangle(overlay, (5, 5), (700, 5 + box_h), _LOG_BG, -1)
-        cv2.addWeighted(overlay, 0.55, out, 0.45, 0, out)
-        for i, (t, ev) in enumerate(recent_events[-n:][::-1]):
-            color = _LOG_FG.get(ev.type, _STATUS_FG)
-            text = f"{t:6.1f}s  {_fmt_event(ev)}"
-            y = 25 + i * h_line
-            cv2.putText(out, text, (12, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
-
-    # Bottom bar: track status (left) + audio status (right)
-    h, w = out.shape[:2]
-
-    # Track status
-    tids = detector.active_track_ids()
-    track_str = "tracks: " + (
-        "  ".join(f"id={tid}:{detector.pose_for(tid)}" for tid in tids)
-        if tids else "(none)"
-    )
-    cv2.putText(out, track_str, (10, h - 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, _STATUS_FG, 1, cv2.LINE_AA)
-
-    # Audio status
-    audio_st = audio.latest_state()
-    if audio_st is not None:
-        audio_str = (
-            f"audio: {audio_st.audio_level_db:.0f}dB  "
-            f"{'SPEECH' if audio_st.speech_active else audio_st.dominant_class}"
-        )
-        (tw, _), _ = cv2.getTextSize(audio_str, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-        cv2.putText(out, audio_str, (w - tw - 10, h - 15),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, _STATUS_FG, 1, cv2.LINE_AA)
-
-    # Plug status — second line from bottom, right-aligned
-    if plugs is not None:
-        parts = []
-        for alias in (config.LAMP_PLUG_ALIAS, config.FAN_PLUG_ALIAS):
-            st = plugs.state(alias)
-            if st is None:
-                parts.append(f"{alias}=?")
-            else:
-                onoff = "ON" if st.is_on else "off"
-                parts.append(f"{alias}={onoff} {st.power_w:.0f}W")
-        plug_str = "plugs: " + "  ".join(parts)
-        (tw, _), _ = cv2.getTextSize(plug_str, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
-        cv2.putText(out, plug_str, (w - tw - 10, h - 35),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 255, 180), 1, cv2.LINE_AA)
-
     return out
 
 
@@ -211,7 +175,7 @@ def main() -> None:
     print(f"  Zones loaded:       {list(config.ZONES.keys()) or '(none)'}")
     print(f"  Calibration:        {config.CALIBRATION_SECONDS}s")
     print(f"  Observer enabled:   {config.OBSERVER_ENABLED}  (model={config.GEMINI_MODEL})")
-    print(f"  Reasoner enabled:   {config.REASONER_ENABLED}  (not wired yet)")
+    print(f"  Reasoner enabled:   {config.REASONER_ENABLED}  (model={config.CLAUDE_MODEL})")
     print()
     print("  Press 'q' in the video window to quit.")
     print("=" * 60)
@@ -360,11 +324,29 @@ def main() -> None:
             config.OBSERVER_REFRESH_INTERVAL_S,
         )
 
+    # -- Step 6d: Speaker (TTS) --
+    speaker = Speaker()
+    if config.TTS_ENABLED:
+        speaker.start()
+
+    # -- Step 6e: Reasoner agent (Layer 2) + decision engine --
+    reasoner = Reasoner(world=world, camera=camera)
+    reasoner_worker = ReasonerWorker(reasoner=reasoner)
+    decisions = DecisionEngine(plugs=plugs, speaker=speaker)
+    if config.REASONER_ENABLED:
+        reasoner_worker.start()
+        log.info(
+            "Reasoner started (model=%s, max_tokens=%d)",
+            config.CLAUDE_MODEL,
+            config.REASONER_MAX_TOKENS,
+        )
+
     # -- Step 7: Main monitoring loop --
     recent_events: list[tuple[float, Event]] = []  # (elapsed_sec, event)
     event_counts: dict[str, int] = {}
     t_start = time.monotonic()
     last_status_print = 0.0
+    last_summary_push = time.monotonic()
     last_display_frame: Optional[np.ndarray] = None  # cache so window always has content
 
     # Graceful Ctrl+C — first press sets the flag, second press force-exits.
@@ -499,8 +481,20 @@ def main() -> None:
                             primary_event_type, escalate,
                             obs_result.get("escalate_reason", ""),
                         )
-                        # TODO Block 4: call Reasoner here
+                        # Beat 1: speak Observer narration immediately
+                        if narration:
+                            speaker.enqueue_beat1(narration)
+                        # Beat 2: push to Reasoner worker (non-blocking)
+                        if config.REASONER_ENABLED:
+                            reasoner_worker.push_work(
+                                obs_result=obs_result,
+                                event_types=obs_event_types,
+                                frame=camera.latest_frame(),
+                            )
                     else:
+                        # Beat 1 only — Observer handled it, no Reasoner needed
+                        if narration:
+                            speaker.enqueue_beat1(narration)
                         log.debug(
                             "Routing → Beat 1 only (trigger=%s, escalate=%s)",
                             primary_event_type, escalate,
@@ -514,6 +508,61 @@ def main() -> None:
                         "reason": obs_result.get("escalate_reason", ""),
                         "ts": time.time(),
                     })
+
+            # --- Check for Reasoner results (Beat 2) ---
+            if config.REASONER_ENABLED:
+                r = reasoner_worker.poll_result()
+                if r is not None:
+                    # Dispatch lamp/fan/alert/TTS actions
+                    decisions.execute(r)
+
+                    # Dashboard: push Reasoner narration + actions
+                    broadcaster.publish_narration("reasoner", {
+                        "narration": r.narration,
+                        "lamp": r.lamp,
+                        "fan": r.fan,
+                        "alert": r.alert,
+                        "speak": r.speak,
+                        "reasoning": r.reasoning,
+                        "world_state_update": r.world_state_update.model_dump(),
+                        "ts": time.time(),
+                    })
+
+                    # Add Beat 2 to the on-screen event log
+                    if r.narration:
+                        beat2_elapsed = time.monotonic() - t_start
+                        recent_events.append((beat2_elapsed, Event(
+                            type="beat_2",
+                            ts=time.monotonic(),
+                            track_id=None,
+                            zones=[],
+                            confidence=1.0,
+                            payload={"narration": r.narration[:80]},
+                        )))
+
+                    if r.narration:
+                        print(f"  [BEAT 2] {r.narration}")
+                    if r.reasoning:
+                        log.debug("Reasoner reasoning: %s", r.reasoning[:200])
+
+            # --- Minutely session summary ---
+            # Every REASONER_SUMMARY_INTERVAL_S seconds, push a synthetic event so
+            # the Reasoner can update its session_narrative and activity_label even
+            # during quiet periods when no real events are triggering it.
+            if config.REASONER_ENABLED:
+                now_s = time.monotonic()
+                if now_s - last_summary_push >= config.REASONER_SUMMARY_INTERVAL_S:
+                    reasoner_worker.push_work(
+                        obs_result={
+                            "narration": "",
+                            "escalate": False,
+                            "escalate_reason": "minutely session summary",
+                        },
+                        event_types=["periodic_refresh_minutely"],
+                        frame=camera.latest_frame(),
+                    )
+                    last_summary_push = now_s
+                    log.debug("Pushed minutely session summary to Reasoner")
 
             # --- Render video overlay ---
             # Always update last_display_frame when we have a new annotated result,
@@ -585,9 +634,13 @@ def main() -> None:
     finally:
         log.info("Shutting down...")
 
-        # Stop Observer worker thread first (it's quick, no hardware)
+        # Stop LLM worker threads first (no hardware — just threads)
         if config.OBSERVER_ENABLED:
             observer_worker.stop()
+        if config.REASONER_ENABLED:
+            reasoner_worker.stop()
+        if config.TTS_ENABLED:
+            speaker.stop()
 
         # Print summary immediately — doesn't depend on hardware cleanup.
         elapsed_total = time.monotonic() - t_start

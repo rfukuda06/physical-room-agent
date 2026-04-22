@@ -154,11 +154,21 @@ REASONER_ALWAYS: set[str] = {
     "lost_person",
     "power_anomaly",
     "security_event",
-    "periodic_refresh_hourly",  # guaranteed hourly full-reasoning pass
+    "periodic_refresh_minutely",  # guaranteed minutely session summary
+    "periodic_refresh_hourly",    # guaranteed hourly full-reasoning pass
 }
 
+# -- Reasoner (Claude Sonnet 4.6) settings --
+CLAUDE_MODEL = "claude-sonnet-4-6"
+REASONER_MAX_TOKENS = 1024              # generous for reasoning + narration + actions
+REASONER_INCLUDE_FRAME_ALWAYS = False   # if True, always send a camera frame
+REASONER_SUMMARY_INTERVAL_S = 60.0     # push a session summary to Reasoner every ~60s
+
+# -- TTS settings --
+TTS_VOICE = "en-US-AriaNeural"      # edge-tts voice; swap for demo preference
+
 # -- Output toggles --
-TTS_ENABLED = True        # speak narrations aloud; turn off during development
+TTS_ENABLED = False       # speak narrations aloud; turn off during development
 TEXT_FEED_ENABLED = True  # always show narrations on the dashboard reasoning feed
 
 

@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+:root {
+  --background: #000000;
+  --foreground: #e4e4e7;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Row highlight — glows the most recent narration row in its agent's
+   brand color for a few seconds, then fades back to the row's normal
+   style. One-shot animation; plays on mount of a new row. */
+@keyframes row-highlight-sky {
+  0% {
+    box-shadow:
+      0 0 0 2px rgba(56, 189, 248, 0.7),
+      0 0 28px rgba(56, 189, 248, 0.5),
+      inset 0 0 20px rgba(56, 189, 248, 0.28);
+    background-color: rgba(56, 189, 248, 0.12);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(56, 189, 248, 0);
+    background-color: transparent;
+  }
+}
+
+@keyframes row-highlight-orange {
+  0% {
+    box-shadow:
+      0 0 0 2px rgba(251, 146, 60, 0.7),
+      0 0 28px rgba(251, 146, 60, 0.5),
+      inset 0 0 20px rgba(251, 146, 60, 0.28);
+    background-color: rgba(251, 146, 60, 0.12);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(251, 146, 60, 0);
+    background-color: transparent;
+  }
+}

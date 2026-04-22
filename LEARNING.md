@@ -6,6 +6,31 @@ Tags: `[decision]` `[mistake]` `[aha]` `[tradeoff]` `[gotcha]`
 
 ---
 
+## 2026-04-17 — Day 3, Dashboard Phase 3 (Next.js scaffold)
+
+### `[gotcha]` Cross-origin MJPEG in `<img>` renders as a black box
+
+**What I assumed:** a plain `<img src="http://127.0.0.1:8000/video/stream">` on the Next.js page (`localhost:3000`) would just work, the same way it works when you paste the backend URL directly into the address bar. FastAPI already had `CORSMiddleware(allow_origins=["*"])` for the JSON/WS endpoints, so I expected the MJPEG to be covered too.
+
+**What actually happened:** the page loaded, the WebSocket connected, `/config` fetched fine, and the SVG zone overlay rendered on top of the video panel — but the video area itself stayed solid black. No JS error, no `onError`, no fallback text. Direct access to `http://127.0.0.1:8000/video/stream` in a new tab worked perfectly, so the stream itself was fine.
+
+Browsers treat `multipart/x-mixed-replace` inside a cross-origin `<img>` differently from direct navigation. Even with `Access-Control-Allow-Origin: *` on the response, the image loader refuses to render the stream (or silently drops parts). This isn't a CORS error in the traditional "blocked by CORS policy" sense — the request succeeds, the response is just ignored by the img element.
+
+**Fix:** made the browser see same-origin requests via Next.js rewrites.
+
+```ts
+// dashboard/next.config.ts
+async rewrites() {
+  return [{ source: "/backend/:path*", destination: "http://127.0.0.1:8000/:path*" }];
+}
+```
+
+Then the frontend uses a relative URL `/backend/video/stream`. Next.js dev server proxies the bytes to port 8000 server-side; the browser thinks it's all same-origin. WebSocket stays on the absolute URL because Next rewrites are HTTP-only, and cross-origin WS doesn't trigger the same image-loader quirk.
+
+**Lesson:** CORS and CORB (Cross-Origin Read Blocking) are different layers. CORS headers let the browser *read* a cross-origin JSON or image. CORB-style policies decide whether certain response types are delivered at all to non-matching contexts. For anything exotic (MJPEG, SSE, streamed responses), the safe default for a browser app is a same-origin proxy — fewer ways for it to silently fail, and it's the same config you'll want in production anyway.
+
+---
+
 ## 2026-04-16 — Day 2, Block 1 (model & SDK choices)
 
 ### `[decision]` Gemini 2.0 Flash → 2.5 Flash, and migrating to google-genai SDK
