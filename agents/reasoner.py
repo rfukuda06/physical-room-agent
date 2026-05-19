@@ -24,8 +24,8 @@ Key concept — the session_narrative:
 Output contract (JSON, validated by Pydantic):
   {
     "narration": "Beat 2 spoken narration (≤40 words) or empty string",
-    "lamp": null,        (always null — plugs disabled for now)
-    "fan": null,         (always null — plugs disabled for now)
+    "lamp": "on" | "off" | null,
+    "fan": "on" | "off" | null,
     "alert": false,
     "speak": true,
     "reasoning": "internal chain-of-thought, NOT spoken",
@@ -232,8 +232,7 @@ should not knowingly emit a refused command either — check DEVICE STATE first.
 
 LAMP
   - Turn ON when a person is in the room AND the frame looks visibly dim AND
-    the lamp is currently off. A person who has just returned from an absence
-    that triggered a cleanup powerdown is a strong case for ON.
+    the lamp is currently off.
   - Turn OFF when the room has been empty long enough that you receive the
     trigger room_empty_confirmed. Pair this with Fan OFF if the fan is on.
   - Do NOT command the lamp if DEVICE STATE shows lockout_active=true.
