@@ -79,6 +79,8 @@ class ReasonerOutput(BaseModel):
     )
     lamp: Optional[Literal["on", "off"]] = Field(default=None)
     fan: Optional[Literal["on", "off"]] = Field(default=None)
+    lamp_reason: str = Field(default="", description="Short internal justification for the lamp action. Not spoken. Empty when lamp is null.")
+    fan_reason: str = Field(default="", description="Short internal justification for the fan action. Not spoken. Empty when fan is null.")
     alert: bool = Field(default=False)
     speak: bool = Field(default=True)
     reasoning: str = Field(
