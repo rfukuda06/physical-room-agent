@@ -336,6 +336,9 @@ def main() -> None:
     decisions = DecisionEngine(plugs=plugs, speaker=speaker, world=world)
 
     def _on_room_empty() -> None:
+        # Bypass the Observer/should_call_reasoner pipeline — the room is
+        # empty so there's nothing to describe. Push straight to the
+        # Reasoner worker with a synthetic obs_result.
         log.info("EmptyRoomWatcher: room_empty_confirmed (debounce elapsed)")
         if not config.REASONER_ENABLED:
             return

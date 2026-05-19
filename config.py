@@ -156,8 +156,12 @@ REASONER_ALWAYS: set[str] = {
     "security_event",
     "periodic_refresh_minutely",  # guaranteed minutely session summary
     "periodic_refresh_hourly",    # guaranteed hourly full-reasoning pass
-    "room_empty_confirmed",       # synthetic event from EmptyRoomWatcher
 }
+# Note: "room_empty_confirmed" is NOT routed through REASONER_ALWAYS.
+# EmptyRoomWatcher pushes that event directly to reasoner_worker (see main.py),
+# bypassing the Observer/routing pipeline because there's no frame to
+# describe — the room is empty. If you wire it through Observer in the
+# future, add it back to this set.
 
 # -- Lamp/fan control (DecisionEngine + override detection) --
 DEVICE_COOLDOWN_S = 60.0           # min seconds between agent toggles on same device

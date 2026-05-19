@@ -451,13 +451,13 @@ snapshot()
   │    ├─ top_classes: [{label, confidence}, ...]
   │    ├─ recent_spike: bool
   │    └─ spike_magnitude_db: float
-  ├─ devices: {"light": {on, power_w}, "fan": {on, power_w}}
+  ├─ devices: {alias: {on, power_w, lockout_active, lockout_remaining_s,
+  │                    last_agent_command_age_s, last_agent_command_intent}}
   ├─ baselines: {audio_mean_db, audio_std_db, typical_occupancy,
   │              power_idle_lamp_w, power_idle_fan_w,
   │              ambient_audio_classes, calibrated}
   ├─ scene_description: str          # written by Observer
   ├─ activity_summary: str           # written by Observer
-  ├─ mood: "quiet"|"active"|"transitional"  # written by Observer
   └─ recent_events: list[dict]       # last 50 events (serialized)
 ```
 

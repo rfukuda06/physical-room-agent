@@ -6,11 +6,13 @@ Takes a ReasonerOutput and dispatches concrete actions: control smart plugs
 security alerts to the dashboard broadcaster.
 
 The Reasoner produces the *judgment* ("turn the lamp on"). DecisionEngine
-applies *guardrails* before any plug call:
-  1. Idempotency — don't re-toggle a device already in the requested state.
-  2. Cooldown   — at most one agent toggle per device per DEVICE_COOLDOWN_S.
-  3. Override lockout — if the user touched the plug manually, leave it
-     alone for MANUAL_OVERRIDE_LOCKOUT_S.
+applies *guardrails* before any plug call (checked in this order so the
+refusal reason surfaces the highest-priority blocker for dashboard debugging):
+  1. Override lockout — if the user touched the plug manually, leave it
+     alone for MANUAL_OVERRIDE_LOCKOUT_S. Checked first so a redundant
+     command during lockout reports "override_lockout", not "idempotent".
+  2. Idempotency — don't re-toggle a device already in the requested state.
+  3. Cooldown   — at most one agent toggle per device per DEVICE_COOLDOWN_S.
   4. No-person ON guard — never command ON when WorldState shows 0 people.
   5. Plug-unreachable — refuse if PlugManager.is_available() is False.
 
@@ -74,6 +76,9 @@ class DecisionEngine:
         try:
             sent_ok = self._plugs.turn_on(alias) if intent else self._plugs.turn_off(alias)
         except Exception as exc:
+            # Note: record_agent_command above already started the cooldown
+            # clock. This is intentional — a stuck plug shouldn't trigger a
+            # retry storm. The next attempt waits DEVICE_COOLDOWN_S.
             log.error("DecisionEngine: plug call %s=%s raised: %s", alias, state, exc)
             self._publish(alias, intent, accepted=False, reason="plug_call_failed",
                           agent_reason=reason)
@@ -93,19 +98,21 @@ class DecisionEngine:
         ds = self._world.device_state(alias)
         now = time.monotonic()
 
-        # 1. Idempotency
+        # 1. Override lockout — checked before idempotency so a redundant
+        # command during lockout reports the real reason ("user touched it")
+        # rather than the misleading "idempotent" telemetry.
+        if ds is not None and ds.lockout_until is not None and ds.lockout_until > now:
+            return False, f"override_lockout ({ds.lockout_until - now:.1f}s left)"
+
+        # 2. Idempotency
         if ds is not None and ds.on == intent:
             return False, "idempotent"
 
-        # 2. Cooldown
+        # 3. Cooldown
         if ds is not None and ds.last_agent_command_at is not None:
             age = now - ds.last_agent_command_at
             if age < config.DEVICE_COOLDOWN_S:
                 return False, f"cooldown ({config.DEVICE_COOLDOWN_S - age:.1f}s left)"
-
-        # 3. Override lockout
-        if ds is not None and ds.lockout_until is not None and ds.lockout_until > now:
-            return False, f"override_lockout ({ds.lockout_until - now:.1f}s left)"
 
         # 4. No-person ON guard
         if intent and self._world.people_count() <= 0:

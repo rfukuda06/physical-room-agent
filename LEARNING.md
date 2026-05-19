@@ -321,6 +321,16 @@ The result is an agent that *feels* respectful rather than bossy. The lamp doesn
 
 **Lesson:** when an LLM is your decider, code-level guardrails are not a fallback for a weak prompt — they are the *contract* between the model and the physical world. Keep the guards small (five in this project), keep them named, and surface every refusal to the dashboard so you can debug *why* nothing happened without adding logging after the fact.
 
+### `[gotcha]` Short override lockout (10s) means the cooldown does most of the work
+
+**What I thought:** the 5-minute manual-override lockout in `MANUAL_OVERRIDE_LOCKOUT_S=300.0` was the right shape — when the user touches a plug, leave it alone for "a while" so the agent isn't immediately bossy. The 60s cooldown was a separate concern (anti-flicker on agent toggles).
+
+**What actually happened:** in practice the 5-minute lockout caused the R3 acknowledgment narration to repeat. Every minute the Reasoner ran a periodic refresh, saw `lockout_active=true` in DEVICE STATE, and re-narrated "noted — leaving the lamp how you set it." The R3 example I baked into the prompt is itself part of the problem — it gave Claude a template to repeat. Reducing the lockout to 10s sidesteps this almost entirely: by the next periodic refresh, the lockout has expired and Claude doesn't see anything unusual.
+
+The trade-off: with `MANUAL_OVERRIDE_LOCKOUT_S=10.0` and `DEVICE_COOLDOWN_S=60.0`, the cooldown is now the dominant brake on retries. The lockout barely enforces user respect on its own — it only matters in the window right after a fresh agent command (where the cooldown would have been short anyway). Effectively, "manual override" now means "log the event and let the normal cooldown play out."
+
+**Lesson:** when prompt examples interact with state-machine durations, the prompt can amplify a UX bug that the timing alone wouldn't cause. The clean fix would be exposing `last_manual_override_age_s` to Claude and gating the acknowledgment on freshness, but that's a bigger change — the durability of a 10s lockout is fine for the demo because the cooldown picks up the slack. If we ever want a "real" lockout that respects the user for minutes at a time, expose the override age in DEVICE STATE first, then bump the duration.
+
 ---
 
 ## Template for new entries
