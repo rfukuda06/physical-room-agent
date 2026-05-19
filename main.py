@@ -41,11 +41,12 @@ from perception.event_detector import Event, EventDetector
 from perception.audio import AudioMonitor
 from perception.plugs import PlugManager
 from agents.baselines import CalibrationCollector
-from agents.world_state import WorldState
+from agents.decisions import DecisionEngine
+from agents.empty_room_watcher import EmptyRoomWatcher
 from agents.observer import Observer, ObserverWorker
 from agents.reasoner import Reasoner, ReasonerWorker
-from agents.decisions import DecisionEngine
 from agents.routing import should_call_reasoner
+from agents.world_state import WorldState
 from actuators.speaker import Speaker
 from server.app import run_server_in_thread
 from server.broadcaster import broadcaster
@@ -332,7 +333,27 @@ def main() -> None:
     # -- Step 6e: Reasoner agent (Layer 2) + decision engine --
     reasoner = Reasoner(world=world, camera=camera)
     reasoner_worker = ReasonerWorker(reasoner=reasoner)
-    decisions = DecisionEngine(plugs=plugs, speaker=speaker)
+    decisions = DecisionEngine(plugs=plugs, speaker=speaker, world=world)
+
+    def _on_room_empty() -> None:
+        log.info("EmptyRoomWatcher: room_empty_confirmed (debounce elapsed)")
+        if not config.REASONER_ENABLED:
+            return
+        reasoner_worker.push_work(
+            obs_result={
+                "narration": "",
+                "escalate": False,
+                "escalate_reason": "room empty for debounce window",
+            },
+            event_types=["room_empty_confirmed"],
+            frame=camera.latest_frame(),
+        )
+
+    empty_room_watcher = EmptyRoomWatcher(
+        on_empty=_on_room_empty,
+        debounce_s=config.EMPTY_ROOM_DEBOUNCE_S,
+    )
+
     if config.REASONER_ENABLED:
         reasoner_worker.start()
         log.info(
@@ -412,6 +433,7 @@ def main() -> None:
                 world.update_audio(audio_st)
             if plugs:
                 world.update_devices(plugs)
+            empty_room_watcher.update(world.people_count())
             for ev in all_events:
                 world.push_event(ev)
 
