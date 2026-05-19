@@ -4,7 +4,6 @@ from __future__ import annotations
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import config
 from agents.empty_room_watcher import EmptyRoomWatcher
 
 
@@ -88,12 +87,26 @@ def test_fires_again_after_second_emptying():
     print("OK test_fires_again_after_second_emptying")
 
 
+def test_does_not_fire_on_cold_start_empty():
+    """Room empty at startup (no one ever seen) must NOT fire — wait for >=1->0 transition."""
+    clk = _Clock()
+    cb, calls = _record_calls()
+    w = EmptyRoomWatcher(cb, debounce_s=3.0, now_fn=clk)
+    # Many empty ticks, never a person — must not fire
+    for _ in range(20):
+        w.update(person_count=0)
+        clk.advance(1.0)
+    assert calls == []
+    print("OK test_does_not_fire_on_cold_start_empty")
+
+
 def main():
     test_does_not_fire_when_room_never_emptied()
     test_fires_after_debounce_when_room_goes_empty()
     test_does_not_refire_while_still_empty()
     test_resets_if_person_returns_before_debounce()
     test_fires_again_after_second_emptying()
+    test_does_not_fire_on_cold_start_empty()
     print("\nAll EmptyRoomWatcher tests passed.")
 
 
