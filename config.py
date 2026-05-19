@@ -156,7 +156,14 @@ REASONER_ALWAYS: set[str] = {
     "security_event",
     "periodic_refresh_minutely",  # guaranteed minutely session summary
     "periodic_refresh_hourly",    # guaranteed hourly full-reasoning pass
+    "room_empty_confirmed",       # synthetic event from EmptyRoomWatcher
 }
+
+# -- Lamp/fan control (DecisionEngine + override detection) --
+DEVICE_COOLDOWN_S = 60.0           # min seconds between agent toggles on same device
+MANUAL_OVERRIDE_LOCKOUT_S = 300.0  # how long to leave a manually-overridden device alone
+AGENT_COMMAND_GRACE_S = 10.0       # window after agent command before mismatched state counts as override
+EMPTY_ROOM_DEBOUNCE_S = 3.0        # seconds the room must stay empty before C1 fires
 
 # -- Reasoner (Claude Sonnet 4.6) settings --
 CLAUDE_MODEL = "claude-sonnet-4-6"

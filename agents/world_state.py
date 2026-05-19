@@ -74,10 +74,18 @@ class AudioSnapshot:
 
 @dataclass
 class DeviceState:
-    """One smart plug's state."""
+    """One smart plug's state, including agent-command history and lockout."""
     alias: str = ""
     on: bool = False
     power_w: float = 0.0
+
+    # Agent-command history (used to detect manual overrides)
+    last_agent_command_at: float | None = None       # monotonic ts of last DE-issued toggle
+    last_agent_command_intent: bool | None = None    # what the agent tried to set it to
+
+    # Manual override / lockout tracking
+    last_manual_override_at: float | None = None     # monotonic ts of last detected override
+    lockout_until: float | None = None               # monotonic ts; if > now, no agent toggles
 
 
 @dataclass
@@ -244,17 +252,78 @@ class WorldState:
                 spike_magnitude_db=float(audio_state.spike_magnitude_db),
             )
 
-    def update_devices(self, plugs: PlugManager) -> None:
-        """Copy latest plug states into the world model."""
+    def record_agent_command(self, alias: str, intent: bool, now: float | None = None) -> None:
+        """Called by DecisionEngine immediately before issuing a turn_on/off.
+
+        Stores the agent's intent and timestamp so update_devices() can later
+        distinguish 'state still settling' from 'user just overrode us'.
+        """
+        if now is None:
+            now = time.monotonic()
+        with self._lock:
+            ds = self._devices.get(alias)
+            if ds is None:
+                ds = DeviceState(alias=alias)
+                self._devices[alias] = ds
+            ds.last_agent_command_at = now
+            ds.last_agent_command_intent = intent
+
+    def device_state(self, alias: str) -> DeviceState | None:
+        """Return a copy of the DeviceState for this plug, or None if unknown."""
+        with self._lock:
+            ds = self._devices.get(alias)
+            if ds is None:
+                return None
+            # Return a copy so callers can read without holding the lock
+            return DeviceState(
+                alias=ds.alias, on=ds.on, power_w=ds.power_w,
+                last_agent_command_at=ds.last_agent_command_at,
+                last_agent_command_intent=ds.last_agent_command_intent,
+                last_manual_override_at=ds.last_manual_override_at,
+                lockout_until=ds.lockout_until,
+            )
+
+    def people_count(self) -> int:
+        """Current number of tracked persons (thread-safe accessor)."""
+        with self._lock:
+            return self._people_count
+
+    def update_devices(self, plugs: PlugManager, now: float | None = None) -> None:
+        """Copy latest plug states into the world model, detecting manual overrides.
+
+        Override detection: if the actual is_on differs from our last agent-command
+        intent AND the command was issued more than AGENT_COMMAND_GRACE_S ago (or
+        we have no record of commanding it at all), the user touched it.
+        Set last_manual_override_at and lockout_until.
+        """
+        if now is None:
+            now = time.monotonic()
         with self._lock:
             for alias in (config.LAMP_PLUG_ALIAS, config.FAN_PLUG_ALIAS):
                 st = plugs.state(alias)
-                if st is not None:
-                    self._devices[alias] = DeviceState(
-                        alias=alias,
-                        on=bool(st.is_on),
-                        power_w=float(st.power_w),
-                    )
+                if st is None:
+                    continue
+                ds = self._devices.get(alias)
+                if ds is None:
+                    ds = DeviceState(alias=alias)
+                    self._devices[alias] = ds
+
+                new_on = bool(st.is_on)
+                # Override detection — only when:
+                #   (a) the new state contradicts our last intent, AND
+                #   (b) we're outside the grace window OR we never commanded the device
+                intent = ds.last_agent_command_intent
+                cmd_at = ds.last_agent_command_at
+                outside_grace = cmd_at is None or (now - cmd_at) > config.AGENT_COMMAND_GRACE_S
+                state_contradicts_intent = (intent is not None) and (new_on != intent)
+                state_changed_unprompted = (intent is None) and (new_on != ds.on)
+
+                if outside_grace and (state_contradicts_intent or state_changed_unprompted):
+                    ds.last_manual_override_at = now
+                    ds.lockout_until = now + config.MANUAL_OVERRIDE_LOCKOUT_S
+
+                ds.on = new_on
+                ds.power_w = float(st.power_w)
 
     def push_event(self, event: Event) -> None:
         """Serialize an Event and append to the ring buffer (max 50)."""
@@ -340,22 +409,48 @@ class WorldState:
                 ],
             }
 
-    def snapshot_for_reasoner(self) -> dict:
-        """Full snapshot for the Reasoner, including session model + events."""
+    def snapshot_for_reasoner(self, now: float | None = None) -> dict:
+        """Full snapshot for the Reasoner, including session model + events.
+
+        `now` is the monotonic reference time for lockout/age calculations.
+        Defaults to time.monotonic().  Pass an explicit value in tests that
+        use synthetic timestamps for update_devices/record_agent_command.
+        """
+        if now is None:
+            now = time.monotonic()
         with self._lock:
-            snap = self._build_snapshot(include_semantic=True, include_events=True)
-            snap["session_elapsed_s"] = round(time.monotonic() - self._session_start, 1)
+            snap = self._build_snapshot(include_semantic=True, include_events=True, now=now)
+            snap["session_elapsed_s"] = round(now - self._session_start, 1)
             snap["session_narrative"] = self._session_narrative
             snap["activity_label"] = self._activity_label
             return snap
+
+    def _device_for_reasoner(self, d: DeviceState, now: float) -> dict:
+        """Serialize one DeviceState for the Reasoner prompt, including lockout info."""
+        lockout_remaining = 0.0
+        if d.lockout_until is not None and d.lockout_until > now:
+            lockout_remaining = d.lockout_until - now
+        last_cmd_age = None
+        if d.last_agent_command_at is not None:
+            last_cmd_age = round(now - d.last_agent_command_at, 1)
+        return {
+            "on": d.on,
+            "power_w": round(d.power_w, 1),
+            "lockout_active": lockout_remaining > 0,
+            "lockout_remaining_s": round(lockout_remaining, 1),
+            "last_agent_command_age_s": last_cmd_age,
+            "last_agent_command_intent": d.last_agent_command_intent,
+        }
 
     def _build_snapshot(
         self,
         include_semantic: bool,
         include_events: bool,
+        now: float | None = None,
     ) -> dict:
         """Internal: build the snapshot dict.  Caller must hold self._lock."""
-        now = time.monotonic()
+        if now is None:
+            now = time.monotonic()
 
         entities = []
         for e in self._entities:
@@ -384,7 +479,7 @@ class WorldState:
                 "spike_magnitude_db": round(self._audio.spike_magnitude_db, 1),
             },
             "devices": {
-                alias: {"on": d.on, "power_w": round(d.power_w, 1)}
+                alias: self._device_for_reasoner(d, now)
                 for alias, d in self._devices.items()
             },
             "baselines": {
