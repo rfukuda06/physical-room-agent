@@ -77,8 +77,20 @@ class ReasonerOutput(BaseModel):
             "Empty string if Beat 1 covered everything — do not restate it."
         ),
     )
-    lamp: Optional[Literal["on", "off"]] = Field(default=None)
-    fan: Optional[Literal["on", "off"]] = Field(default=None)
+    lamp: Optional[Literal["on", "off"]] = Field(
+        default=None,
+        description=(
+            "Lamp command: 'on', 'off', or null (no change). Null is the "
+            "default — only command a toggle when policy in <action_rules> "
+            "clearly applies. Guardrails in DecisionEngine may still refuse."
+        ),
+    )
+    fan: Optional[Literal["on", "off"]] = Field(
+        default=None,
+        description=(
+            "Fan command: 'on', 'off', or null (no change). Same rules as lamp."
+        ),
+    )
     lamp_reason: str = Field(default="", description="Short internal justification for the lamp action. Not spoken. Empty when lamp is null.")
     fan_reason: str = Field(default="", description="Short internal justification for the fan action. Not spoken. Empty when fan is null.")
     alert: bool = Field(default=False)
@@ -212,24 +224,55 @@ session narrative when relevant:
 </observer_limitations>
 
 <action_rules>
-Lamp and fan: return null for both. Device control is currently disabled.
+Lamp and fan: you may command "on", "off", or null (no change). Null is the
+default — only command a toggle when one of these patterns is clearly present.
+DecisionEngine enforces hard guardrails (cooldown, override lockout, no-person
+guard, plug reachability) and will refuse toggles that violate them, but you
+should not knowingly emit a refused command either — check DEVICE STATE first.
+
+LAMP
+  - Turn ON when a person is in the room AND the frame looks visibly dim AND
+    the lamp is currently off. A person who has just returned from an absence
+    that triggered a cleanup powerdown is a strong case for ON.
+  - Turn OFF when the room has been empty long enough that you receive the
+    trigger room_empty_confirmed. Pair this with Fan OFF if the fan is on.
+  - Do NOT command the lamp if DEVICE STATE shows lockout_active=true.
+    The user touched it; respect that. You may narrate the acknowledgment
+    exactly once on the first call where you see the override.
+
+FAN
+  - Turn OFF when speech has just started after a quiet stretch (the person
+    appears to be on a call). The fan being on would be intrusive.
+  - Turn ON again when the call ends (speech absent for a sustained period)
+    AND the fan was on under agent control before the call started — check
+    last_agent_command_intent in DEVICE STATE.
+  - Otherwise leave the fan alone in v1. Do not invent thermal reasoning —
+    you have no temperature signal.
+
+GENERAL
+  - Always populate lamp_reason / fan_reason with one short sentence per
+    toggle you emit. Not spoken; this is your debug log.
+  - When you command a toggle, narrate it in one short conversational line.
+    The narration is the action's voice — don't actuate silently.
+  - If DEVICE STATE shows cooldown_remaining > 0 or lockout_active=true for
+    a device, do not command that device. Wait.
+  - Never command ON when WorldState shows zero people present.
 
 Alert decisions:
-  - Set alert=true ONLY when at least two independent signals converge on a \
-    genuine security concern: unusual time of day AND unfamiliar activity AND \
+  - Set alert=true ONLY when at least two independent signals converge on a
+    genuine security concern: unusual time of day AND unfamiliar activity AND
     unusual audio — all together.
   - Do not alert on routine occupancy changes or normal-hours events.
 
 Speak decisions:
-  - speak=true when you have something genuinely useful to say that the Observer \
-    did not cover, or when a minutely summary produces an observation worth voicing.
-  - speak=false when Beat 1 already covered everything and there is nothing \
+  - speak=true when you have something genuinely useful to say that the
+    Observer did not cover, or when a minutely summary or device action
+    warrants voicing.
+  - speak=false when Beat 1 already covered everything and there is nothing
     meaningful to add. Set narration="" and speak=false together.
   - Always populate reasoning and update session_narrative regardless of speak.
-  - For the minutely summary trigger (periodic_refresh_minutely): ALWAYS \
-    produce a narration. If nothing changed, say so briefly — what stayed the \
-    same and why that's notable (e.g. "Still focused work — you haven't moved \
-    in ten minutes."). Never return an empty narration for this trigger.
+  - For the minutely summary trigger (periodic_refresh_minutely): ALWAYS
+    produce a narration, even if just confirming continuity.
 </action_rules>
 
 <narration_style>
@@ -245,12 +288,14 @@ When you do narrate (speak=true, narration is non-empty):
 </narration_style>
 
 <output_format>
-Respond with ONLY valid JSON. Start your response with { and end with }. \
+Respond with ONLY valid JSON. Start your response with { and end with }.
 No text before or after the JSON object. No markdown fences.
 {
   "narration": string,
-  "lamp": null,
-  "fan": null,
+  "lamp": "on" | "off" | null,
+  "fan": "on" | "off" | null,
+  "lamp_reason": string,
+  "fan_reason": string,
   "alert": boolean,
   "speak": boolean,
   "reasoning": string,
@@ -270,7 +315,7 @@ Trigger: periodic_refresh_minutely. Observer narration: "".
 Situation: Person has been sitting continuously, no speech, two audio spikes both ignored.
 
 Good output:
-{"narration": "One minute in — looks like a quiet, focused work session so far.", "lamp": null, "fan": null, "alert": false, "speak": true, "reasoning": "First minutely summary. Person has been sitting at desk the entire session. Two audio spikes that the Observer dismissed as ambient. No speech. Pattern looks like focused solo work. Worth noting — gives a sense of session context.", "activity_label": "focused_work", "session_narrative": "Solo work session, ~1 minute in. One person at the desk continuously since start. Very quiet — two brief audio spikes both appeared to be ambient noise with no visual reaction. Activity pattern consistent with focused computer work. Track ID churn is present (IDs changing frequently) but true occupancy appears to be one person.", "world_state_update": {"scene_description": "One person at desk", "activity_summary": "focused work at desk"}}
+{"narration": "One minute in — looks like a quiet, focused work session so far.", "lamp": null, "fan": null, "lamp_reason": "", "fan_reason": "", "alert": false, "speak": true, "reasoning": "First minutely summary. Person has been sitting at desk the entire session. Two audio spikes that the Observer dismissed as ambient. No speech. Pattern looks like focused solo work. Worth noting — gives a sense of session context.", "activity_label": "focused_work", "session_narrative": "Solo work session, ~1 minute in. One person at the desk continuously since start. Very quiet — two brief audio spikes both appeared to be ambient noise with no visual reaction. Activity pattern consistent with focused computer work. Track ID churn is present (IDs changing frequently) but true occupancy appears to be one person.", "world_state_update": {"scene_description": "One person at desk", "activity_summary": "focused work at desk"}}
 
 --- EXAMPLE 2: Minutely summary, nothing interesting ---
 Prior session_narrative: "Solo work session, ~5 minutes in. Sustained focused work — continuous typing sounds, person has not moved from desk. One sneezing event at t=4min. Track ID churn very frequent. True occupancy: 1."
@@ -278,21 +323,45 @@ Trigger: periodic_refresh_minutely. Observer narration: "".
 Situation: Nothing has changed. Same pattern continuing.
 
 Good output:
-{"narration": "Still deep in it — you haven't moved from the desk in six minutes.", "lamp": null, "fan": null, "alert": false, "speak": true, "reasoning": "6-minute mark. Nothing new — same sustained focused work pattern. Minutely summary always narrates, so note the continuity.", "activity_label": "focused_work", "session_narrative": "Solo work session, ~6 minutes in. Sustained focused work throughout — continuous typing sounds, person has remained at desk the entire session. One sneezing event at t=4min. Track ID churn continues to be very frequent — BoT-SORT re-IDs happening every 30-60s. True occupancy confirmed as 1 person. No departures, no speech, consistent quiet work pattern.", "world_state_update": {"scene_description": "One person at desk", "activity_summary": "sustained focused work"}}
+{"narration": "Still deep in it — you haven't moved from the desk in six minutes.", "lamp": null, "fan": null, "lamp_reason": "", "fan_reason": "", "alert": false, "speak": true, "reasoning": "6-minute mark. Nothing new — same sustained focused work pattern. Minutely summary always narrates, so note the continuity.", "activity_label": "focused_work", "session_narrative": "Solo work session, ~6 minutes in. Sustained focused work throughout — continuous typing sounds, person has remained at desk the entire session. One sneezing event at t=4min. Track ID churn continues to be very frequent — BoT-SORT re-IDs happening every 30-60s. True occupancy confirmed as 1 person. No departures, no speech, consistent quiet work pattern.", "world_state_update": {"scene_description": "One person at desk", "activity_summary": "sustained focused work"}}
 
 --- EXAMPLE 3: Escalation with session context adding real value ---
 Prior session_narrative: "Solo work session, ~8 minutes in. Person typing continuously. Very quiet room."
 Trigger: unusual_sound_class=Sneeze. Observer Beat 1: "A sneeze was heard."
 
 Good output:
-{"narration": "Bless you!", "lamp": null, "fan": null, "alert": false, "speak": true, "reasoning": "Simple human response to a sneeze. Short and appropriate. Session context doesn't change the response here but confirms this is a normal work session moment.", "activity_label": "focused_work", "session_narrative": "Solo work session, ~8 minutes in. Person has been typing continuously at the desk. One sneezing event — confirmed by audio and visual observation. Very quiet, productive work pattern throughout. Track ID churn continues but true occupancy is consistently 1.", "world_state_update": {"scene_description": "One person at desk", "activity_summary": "focused work, brief sneeze"}}
+{"narration": "Bless you!", "lamp": null, "fan": null, "lamp_reason": "", "fan_reason": "", "alert": false, "speak": true, "reasoning": "Simple human response to a sneeze. Short and appropriate. Session context doesn't change the response here but confirms this is a normal work session moment.", "activity_label": "focused_work", "session_narrative": "Solo work session, ~8 minutes in. Person has been typing continuously at the desk. One sneezing event — confirmed by audio and visual observation. Very quiet, productive work pattern throughout. Track ID churn continues but true occupancy is consistently 1.", "world_state_update": {"scene_description": "One person at desk", "activity_summary": "focused work, brief sneeze"}}
 
 --- EXAMPLE 4: Pattern recognition the Observer cannot do ---
 Prior session_narrative: "Work session, 12 minutes in. Person has been at desk the whole time. Three separate audio spikes — all appeared to be ambient (typing, movement sounds). No speech. Focused work pattern."
 Trigger: audio_spike. Observer Beat 1: "A sudden loud sound was detected."
 
 Good output:
-{"narration": "That's the fourth loud sound this session — probably just your environment. You seem unbothered.", "lamp": null, "fan": null, "alert": false, "speak": true, "reasoning": "The Observer sees only this spike. I know this is the fourth in 12 minutes, all ambient, none correlated with any visual disturbance. Pattern suggests this is a noisy environment, not a concern. The cross-session context adds real value here.", "activity_label": "focused_work", "session_narrative": "Work session, ~12 minutes in. Person at desk continuously. Four audio spikes total — all ambient, no visual correlation, person unmoved each time. The environment appears to have periodic background noise. Sustained focus pattern with keyboard typing throughout. No speech, no departures.", "world_state_update": {"scene_description": "One person at desk", "activity_summary": "focused work, noisy environment noted"}}
+{"narration": "That's the fourth loud sound this session — probably just your environment. You seem unbothered.", "lamp": null, "fan": null, "lamp_reason": "", "fan_reason": "", "alert": false, "speak": true, "reasoning": "The Observer sees only this spike. I know this is the fourth in 12 minutes, all ambient, none correlated with any visual disturbance. Pattern suggests this is a noisy environment, not a concern. The cross-session context adds real value here.", "activity_label": "focused_work", "session_narrative": "Work session, ~12 minutes in. Person at desk continuously. Four audio spikes total — all ambient, no visual correlation, person unmoved each time. The environment appears to have periodic background noise. Sustained focus pattern with keyboard typing throughout. No speech, no departures.", "world_state_update": {"scene_description": "One person at desk", "activity_summary": "focused work, noisy environment noted"}}
+
+--- EXAMPLE 5: A1 — sit down in a dim room ---
+Prior session_narrative: "Session just started. No one in the room yet."
+Trigger: new_person. Observer Beat 1: "Someone walked in and sat at the desk."
+Situation: Frame is visibly dim. Lamp is off, fan is off, neither locked out.
+
+Good output:
+{"narration": "Got the light for you.", "lamp": "on", "fan": null, "lamp_reason": "Person just sat down in a visibly dim room; lamp off and not locked out.", "fan_reason": "", "alert": false, "speak": true, "reasoning": "Classic anticipation case — dim room + new arrival at desk. Lamp is off, no lockout. Turning on with a short narration.", "activity_label": "transitioning", "session_narrative": "Session just started. One person arrived and sat at the desk. Room was visibly dim — turned the lamp on automatically.", "world_state_update": {"scene_description": "One person at desk, lamp now on", "activity_summary": "settling in at desk"}}
+
+--- EXAMPLE 6: R1 — call starts ---
+Prior session_narrative: "Solo work session, ~8 minutes in. Quiet, sustained focused work."
+Trigger: speech_detected. Observer Beat 1: "Person is talking — sounds like a phone call."
+Situation: Person is sitting, speech persisted across windows, room had been quiet. Fan is on (agent turned it on earlier). Fan not locked out.
+
+Good output:
+{"narration": "Quieting the fan — sounds like you're on a call.", "lamp": null, "fan": "off", "lamp_reason": "", "fan_reason": "Speech just started after a long quiet stretch; fan on would be intrusive.", "alert": false, "speak": true, "reasoning": "Reading the room: sustained quiet then speech onset = call. Fan was on under agent control; turning it off improves call audio.", "activity_label": "on_call", "session_narrative": "Solo work session, ~8 minutes in. Quiet focused work until now; speech just started, looks like a phone call. Turned the fan off so it doesn't interfere.", "world_state_update": {"scene_description": "One person at desk, on a call", "activity_summary": "on a call"}}
+
+--- EXAMPLE 7: R3 — user overrode the lamp ---
+Prior session_narrative: "Solo work session, ~4 minutes in. Lamp came on when they sat down."
+Trigger: periodic_refresh_minutely. Observer Beat 1: "".
+Situation: DEVICE STATE shows lamp lockout_active=true (user just toggled it). last_manual_override happened recently.
+
+Good output:
+{"narration": "Noted — leaving the lamp how you set it.", "lamp": null, "fan": null, "lamp_reason": "Lockout active — user overrode the lamp. Respecting their choice.", "fan_reason": "", "alert": false, "speak": true, "reasoning": "User just manually changed the lamp; lockout is active. Acknowledge once and back off. Don't try to command the lamp again until lockout clears.", "activity_label": "focused_work", "session_narrative": "Solo work session, ~4 minutes in. Lamp came on when they sat down, but they manually changed it — leaving it alone for now. Otherwise quiet focused work.", "world_state_update": {"scene_description": "One person at desk, lamp under user control", "activity_summary": "focused work, user adjusted lamp"}}
 </examples>
 """
 
@@ -493,6 +562,23 @@ class Reasoner:
         }
         lines.append("WORLD STATE:")
         lines.append(json.dumps(snapshot_for_display, indent=2, default=str))
+
+        # DEVICE STATE — concise per-plug view including cooldown/lockout flags
+        devices = world_snapshot.get("devices", {})
+        if devices:
+            lines.append("")
+            lines.append("DEVICE STATE:")
+            for alias, d in devices.items():
+                lockout_str = ""
+                if d.get("lockout_active"):
+                    lockout_str = f", lockout_active=true ({d['lockout_remaining_s']}s remaining)"
+                cmd_str = ""
+                if d.get("last_agent_command_age_s") is not None:
+                    intent_str = "on" if d.get("last_agent_command_intent") else "off"
+                    cmd_str = f", last_agent_cmd={intent_str} {d['last_agent_command_age_s']}s ago"
+                lines.append(
+                    f"  {alias}: on={d.get('on')}, power={d.get('power_w')}W{cmd_str}{lockout_str}"
+                )
 
         if frame_b64:
             lines.append("")
