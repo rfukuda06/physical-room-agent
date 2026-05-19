@@ -587,7 +587,7 @@ Single daemon thread. Same pattern as ObserverWorker: 0.5s debounce, latest-resu
 - `DecisionEngine(plugs, speaker, world)` — constructor.
 - `.execute(output: ReasonerOutput) -> None` — run all actions in fixed order: (1) lamp, (2) fan, (3) alert, (4) Beat 2 TTS.
 
-**The 5 guardrails (applied to every device command, in order):**
+**The 6 guardrails (applied to every device command, in order):**
 
 | # | Guard | Refusal reason string |
 |---|---|---|
@@ -596,6 +596,7 @@ Single daemon thread. Same pattern as ObserverWorker: 0.5s debounce, latest-resu
 | 3 | **Override lockout** — back off for `MANUAL_OVERRIDE_LOCKOUT_S` after a manual user toggle | `"override_lockout (Xs left)"` |
 | 4 | **No-person ON guard** — never command ON when `WorldState.people_count() == 0` | `"no_person_for_on"` |
 | 5 | **Plug-unreachable** — refuse if `PlugManager.is_available(alias)` is False | `"plug_unreachable"` |
+| 6 | **Plug call failed** — plug call raised an exception or `turn_on`/`turn_off` returned False | `"plug_call_failed"` |
 
 Every accepted or refused decision is published to the broadcaster (`publish_narration("decision_engine", {...})`) so the dashboard can show what happened and why. The `agent_reason` field carries the Reasoner's original `lamp_reason`/`fan_reason` for debugging.
 
