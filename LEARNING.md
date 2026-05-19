@@ -307,6 +307,22 @@ Leave at 1 unless symptoms show.
 
 ---
 
+## 2026-05-18 — Day 2/3 boundary, Lamp & fan control
+
+### `[architecture]` Two-tier decision split: Claude does judgment, code does guardrails
+
+**What I thought:** the Reasoner prompt alone was enough. If you tell Claude "only turn on the lamp when someone is present" and "don't toggle twice in five seconds", the model will follow the rule. The agent's behavior comes from the quality of the instructions, so adding code checks would just be redundancy.
+
+**What actually happened:** prompts drift. A context-heavy call shifts the model's attention; a borderline event produces "lamp: on" when the room is empty because the reasoning section convinced itself a person might still be there. And there is no way to write a prompt clause that enforces "the user touched it 8 seconds ago — back off for 30 more seconds" reliably. The rule requires exact wall-clock arithmetic, not natural language judgment. Beyond correctness, the two-beat rhythm means Beat 2 narration arrives *while the lamp is already toggling* — any retry logic in the prompt is too slow to matter.
+
+The fix was to make the split explicit: Claude owns judgment ("should the lamp change state and why?"), the DecisionEngine owns enforcement (five named guardrails in code: idempotency, cooldown, override lockout, no-person ON guard, plug-unreachable). The DecisionEngine publishes every refusal — reason string and all — to the dashboard broadcaster, so when nothing happens you can see exactly which guard fired and why. The Reasoner prompt doesn't mention the guardrails at all; Claude just decides, and the engine filters.
+
+The result is an agent that *feels* respectful rather than bossy. The lamp doesn't flicker. A manual override isn't ignored thirty seconds later. Turning on a light for an empty room never happens.
+
+**Lesson:** when an LLM is your decider, code-level guardrails are not a fallback for a weak prompt — they are the *contract* between the model and the physical world. Keep the guards small (five in this project), keep them named, and surface every refusal to the dashboard so you can debug *why* nothing happened without adding logging after the fact.
+
+---
+
 ## Template for new entries
 
 ```

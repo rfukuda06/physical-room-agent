@@ -9,7 +9,7 @@ Legend:
 
 ---
 
-## Current state (Day 3 — dashboard Phases 1–3)
+## Current state (Day 3 — lamp/fan control rollout complete)
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -205,11 +205,8 @@ Legend:
 │     - publish_routing on each Reasoner routing decision                 │
 │     - publish_frame (throttled 15 FPS) of the annotated BGR frame       │
 │                                                                         │
-│   NOT YET WIRED (future blocks):                                       │
-│     - Reasoner (Day 2 Block 4)                                          │
-│     - TTS actuator (Day 2 Block 5)                                      │
-│     - Decision logic (Day 2 Block 6)                                    │
-│     - Next.js frontend (Day 3 Phase 3+)                                 │
+│   NOT YET WIRED (future):                                              │
+│     - Next.js frontend (Day 3 Phase 3+ beyond dashboard Phase 1-3)     │
 └────────────────────────────────────────────────────────────────────────┘
                                     │
 ├────────────────────────────────────────────────────────────────────────┤
@@ -229,9 +226,30 @@ Legend:
 │  ✅ agents/observer.py — Observer + ObserverWorker (Day 2 Block 3)       │
 │     Gemini 2.5 Flash integration. Event-driven + 45s periodic refresh.  │
 │     Threaded worker with 0.5s debounce. Fallback on API failure.        │
-│  🟡 agents/reasoner.py, decisions.py — stubs                            │
+│  ✅ agents/reasoner.py — Reasoner + ReasonerWorker (Day 2/3 boundary)    │
+│     Claude Sonnet integration. Receives Observer output + full world     │
+│     context. Returns ReasonerOutput with lamp/fan/lamp_reason/fan_reason │
+│     fields plus narration, speak, alert, reasoning.                      │
+│  ✅ agents/decisions.py — DecisionEngine (Day 2/3 boundary)              │
+│     Translates ReasonerOutput into physical actions with 5 code-enforced │
+│     guardrails (in order): (1) idempotency — skip if device already in  │
+│     requested state; (2) cooldown — at most one agent toggle per device  │
+│     per DEVICE_COOLDOWN_S; (3) override lockout — back off for           │
+│     MANUAL_OVERRIDE_LOCKOUT_S after a manual user toggle; (4) no-person │
+│     ON guard — never command ON when WorldState shows 0 people; (5)     │
+│     plug-unreachable — refuse if PlugManager.is_available() is False.   │
+│     Every accepted or refused decision is published to the broadcaster.  │
+│     Constructor: DecisionEngine(plugs, speaker, world).                  │
+│  ✅ agents/empty_room_watcher.py — EmptyRoomWatcher (Day 2/3 boundary)  │
+│     Pure-logic debounce that fires a `room_empty_confirmed` callback     │
+│     exactly once after the room has been empty for EMPTY_ROOM_DEBOUNCE_S│
+│     following a confirmed ≥1 → 0 person-count transition. Cold-start-   │
+│     empty rooms are silently ignored until the first person appears.     │
 ├────────────────────────────────────────────────────────────────────────┤
-│  🟡 actuators/*.py — (Day 2) TTS speaker + smart_plug wrapper. Stubs.   │
+│  ✅ actuators/speaker.py — Speaker, TTS beat queue (Day 2/3 boundary)   │
+│     Wraps edge-tts/pyttsx3. Exposes enqueue_beat1/enqueue_beat2.        │
+│  ✅ actuators/smart_plug.py — thin wrapper; plug control goes via        │
+│     PlugManager. Wired through DecisionEngine.                           │
 ├────────────────────────────────────────────────────────────────────────┤
 │  ✅ server/broadcaster.py — DashboardBroadcaster (Day 3 Phase 1)        │
 │     Thread-safe fan-out from sync producers (main loop) to async       │
@@ -525,6 +543,70 @@ prompts can deprioritize them as part of the room's normal sound profile.
 **Periodic refresh:** 45s timer. When no events push for 45s, fires a
 refresh call with empty event list (still sends camera frames).
 **Threading:** single daemon thread. No queue needed — latest result only.
+
+### Reasoner (Day 2/3 boundary)
+
+- `Reasoner(world, camera)` — constructor. Creates an `anthropic.Anthropic` client.
+- `Reasoner.call(observer_output, trigger_events) -> ReasonerOutput | None` — synchronous Claude call.
+
+Triggered only when the hybrid routing policy escalates (see `agents/routing.py`): event type in `REASONER_ALWAYS` OR Observer returned `escalate=true`. Reads the previous `session_narrative` from WorldState and rewrites it with new understanding, compounding context over the session lifetime.
+
+**Output contract (`ReasonerOutput` — Pydantic model):**
+
+```
+ReasonerOutput
+  ├─ narration: str              # Beat 2 spoken text (≤40 words) or ""
+  ├─ lamp: "on" | "off" | null  # device command (null = no change)
+  ├─ fan:  "on" | "off" | null
+  ├─ lamp_reason: str            # plain-English justification for lamp decision
+  ├─ fan_reason: str             # plain-English justification for fan decision
+  ├─ alert: bool                 # true → security/anomaly alert
+  ├─ speak: bool                 # whether narration should play via TTS
+  ├─ reasoning: str              # internal chain-of-thought (NOT spoken)
+  ├─ activity_label: str         # "focused_work"|"idle"|"on_call"|"eating"|
+  │                              #   "break"|"active"|"transitioning"|"unknown"
+  ├─ session_narrative: str      # rewritten running session interpretation
+  └─ world_state_update:
+       ├─ scene_description: str
+       └─ activity_summary: str
+```
+
+The `lamp`/`fan` fields are **null** when the Reasoner sees no reason to change the device state. When non-null, they carry the Reasoner's *judgment*; the DecisionEngine applies guardrails before any physical action.
+
+### ReasonerWorker (Day 2/3 boundary)
+
+- `ReasonerWorker(reasoner, decision_engine)` — constructor.
+- `.start()` / `.stop()` — lifecycle.
+- `.enqueue(observer_output, trigger_events, frame)` — non-blocking, called from main loop.
+- `.poll_result() -> ReasonerOutput | None` — non-blocking, returns latest result.
+
+Single daemon thread. Same pattern as ObserverWorker: 0.5s debounce, latest-result slot. Passes output to `DecisionEngine.execute()` automatically after each successful call.
+
+### DecisionEngine (Day 2/3 boundary)
+
+- `DecisionEngine(plugs, speaker, world)` — constructor.
+- `.execute(output: ReasonerOutput) -> None` — run all actions in fixed order: (1) lamp, (2) fan, (3) alert, (4) Beat 2 TTS.
+
+**The 5 guardrails (applied to every device command, in order):**
+
+| # | Guard | Refusal reason string |
+|---|---|---|
+| 1 | **Idempotency** — skip if device already in requested state | `"idempotent"` |
+| 2 | **Cooldown** — at most one agent toggle per device per `DEVICE_COOLDOWN_S` | `"cooldown (Xs left)"` |
+| 3 | **Override lockout** — back off for `MANUAL_OVERRIDE_LOCKOUT_S` after a manual user toggle | `"override_lockout (Xs left)"` |
+| 4 | **No-person ON guard** — never command ON when `WorldState.people_count() == 0` | `"no_person_for_on"` |
+| 5 | **Plug-unreachable** — refuse if `PlugManager.is_available(alias)` is False | `"plug_unreachable"` |
+
+Every accepted or refused decision is published to the broadcaster (`publish_narration("decision_engine", {...})`) so the dashboard can show what happened and why. The `agent_reason` field carries the Reasoner's original `lamp_reason`/`fan_reason` for debugging.
+
+### EmptyRoomWatcher (Day 2/3 boundary)
+
+- `EmptyRoomWatcher(on_empty, debounce_s, now_fn)` — constructor.
+- `.update(person_count: int) -> None` — called every main-loop tick.
+
+Pure-logic debounce: fires the `on_empty` callback exactly once after the room has been continuously empty for `debounce_s` seconds following a confirmed ≥1 → 0 person-count transition. Cold-start-empty rooms (room is empty when the agent starts, before any person has ever appeared) are silently ignored — the watcher waits for the first person before it can fire on their departure. If a person reappears before the debounce threshold, the watcher resets and waits for the next transition.
+
+The `on_empty` callback in main.py synthesizes a `room_empty_confirmed` event and pushes it to the ObserverWorker, which escalates to the Reasoner via the normal routing path. This triggers the lamp-off logic without baking occupancy logic into the DecisionEngine itself.
 
 ### DashboardBroadcaster (Day 3 Phase 1)
 
