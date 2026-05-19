@@ -114,6 +114,18 @@ def test_snapshot_for_reasoner_includes_lockout_info():
     print("OK test_snapshot_for_reasoner_includes_lockout_info")
 
 
+def test_update_devices_no_override_on_first_contact_when_plug_already_on():
+    """Plug is already ON when agent boots — must NOT flag as override."""
+    w = WorldState()
+    # First-ever poll sees lamp ON. No prior command.
+    w.update_devices(_fake_plugs(lamp_on=True, fan_on=False), now=1000.0)
+    ds = w.device_state(config.LAMP_PLUG_ALIAS)
+    assert ds.on is True
+    assert ds.last_manual_override_at is None
+    assert ds.lockout_until is None
+    print("OK test_update_devices_no_override_on_first_contact_when_plug_already_on")
+
+
 def main():
     test_device_state_defaults_have_new_fields()
     test_record_agent_command_sets_intent_and_ts()
@@ -122,6 +134,7 @@ def main():
     test_update_devices_detects_override_after_grace()
     test_update_devices_detects_override_when_no_prior_command()
     test_snapshot_for_reasoner_includes_lockout_info()
+    test_update_devices_no_override_on_first_contact_when_plug_already_on()
     print("\nAll WorldState device tests passed.")
 
 

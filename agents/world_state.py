@@ -87,6 +87,11 @@ class DeviceState:
     last_manual_override_at: float | None = None     # monotonic ts of last detected override
     lockout_until: float | None = None               # monotonic ts; if > now, no agent toggles
 
+    # First-contact sentinel: set to True after the very first update_devices poll.
+    # Override detection is skipped on the first observation to avoid a startup
+    # false positive when the plug was already on before the agent started.
+    _observed: bool = False
+
 
 @dataclass
 class Baselines:
@@ -281,6 +286,7 @@ class WorldState:
                 last_agent_command_intent=ds.last_agent_command_intent,
                 last_manual_override_at=ds.last_manual_override_at,
                 lockout_until=ds.lockout_until,
+                _observed=ds._observed,
             )
 
     def people_count(self) -> int:
@@ -309,21 +315,30 @@ class WorldState:
                     self._devices[alias] = ds
 
                 new_on = bool(st.is_on)
-                # Override detection — only when:
-                #   (a) the new state contradicts our last intent, AND
-                #   (b) we're outside the grace window OR we never commanded the device
-                intent = ds.last_agent_command_intent
-                cmd_at = ds.last_agent_command_at
-                outside_grace = cmd_at is None or (now - cmd_at) > config.AGENT_COMMAND_GRACE_S
-                state_contradicts_intent = (intent is not None) and (new_on != intent)
-                state_changed_unprompted = (intent is None) and (new_on != ds.on)
+                # first_contact is True when update_devices has never polled
+                # this plug before AND no prior agent command has been recorded.
+                # If an agent command exists (record_agent_command was called
+                # before the first poll), we still run override detection so
+                # we can catch a plug that ignored the command.
+                first_contact = (not ds._observed) and (ds.last_agent_command_intent is None)
 
-                if outside_grace and (state_contradicts_intent or state_changed_unprompted):
-                    ds.last_manual_override_at = now
-                    ds.lockout_until = now + config.MANUAL_OVERRIDE_LOCKOUT_S
+                if not first_contact:
+                    # Override detection — only when:
+                    #   (a) the new state contradicts our last intent, AND
+                    #   (b) we're outside the grace window OR we never commanded the device
+                    intent = ds.last_agent_command_intent
+                    cmd_at = ds.last_agent_command_at
+                    outside_grace = cmd_at is None or (now - cmd_at) > config.AGENT_COMMAND_GRACE_S
+                    state_contradicts_intent = (intent is not None) and (new_on != intent)
+                    state_changed_unprompted = (intent is None) and (new_on != ds.on)
+
+                    if outside_grace and (state_contradicts_intent or state_changed_unprompted):
+                        ds.last_manual_override_at = now
+                        ds.lockout_until = now + config.MANUAL_OVERRIDE_LOCKOUT_S
 
                 ds.on = new_on
                 ds.power_w = float(st.power_w)
+                ds._observed = True
 
     def push_event(self, event: Event) -> None:
         """Serialize an Event and append to the ring buffer (max 50)."""
