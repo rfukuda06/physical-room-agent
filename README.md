@@ -1,6 +1,6 @@
-# Newton-for-a-Room
+# Physical Room Agent
 
-A Physical AI room agent that watches, listens, and reasons about what's happening in a single room — then narrates it and acts on connected devices. Built as an Archetype AI interview MVP.
+An always-on Physical AI agent that turns a single room into something it can perceive, narrate, and act on. It fuses live video, microphone audio, and smart-plug telemetry into one running understanding of the room — reasoning about who's there and what they're doing, speaking what it sees out loud, and controlling connected devices to match.
 
 ## Demo
 
@@ -8,9 +8,15 @@ A Physical AI room agent that watches, listens, and reasons about what's happeni
 
 <!-- Drop the screenshot at `docs/demo.png` (or update the path above). -->
 
-## What it does
+## What it can do
 
-The agent treats one room as its whole world. A webcam, a microphone, and a pair of TP-Link Kasa smart plugs feed a three-tier perception → observation → reasoning pipeline. The output is a running two-beat narration ("someone just sat down at the desk" → "they look like they're starting a focus session — dimming the lamp") plus direct control of a lamp and fan.
+- **Watches and tracks people** — sees who enters, leaves, sits, stands, walks, and which zone of the room they're in.
+- **Listens and classifies sound** — speech, alerts, unusual noises, tuned to your room's baseline.
+- **Narrates the moment** — speaks two beats: a fast factual one, then a slower interpretive one.
+- **Reasons about activity** — infers what's happening (focused work, a call, a break).
+- **Compounds its understanding over time** — its model of the session keeps getting richer the longer it runs, instead of resetting on every event.
+- **Controls connected devices** — toggles smart plugs based on judgment, not fixed rules. My setup uses a lamp and a fan.
+- **Refuses its own bad ideas** — code-level guardrails block unsafe or redundant actions before they leave the agent.
 
 ## Architecture
 
@@ -19,40 +25,65 @@ Three layers with a "two-beat rhythm":
 | Layer | Role | Models / Libs | Latency |
 |-------|------|---------------|---------|
 | **0 — Perception** | Continuous local sensing. Produces structured events. No LLM calls. | YOLO26n-pose (detection + BoT-SORT tracking + pose), YAMNet (audio), python-kasa (plugs) | real-time |
-| **1 — Observer** | Fast factual description of what just happened. Emits Beat 1 narration + updates world state. | Gemini 2.5 Flash (`thinking_budget=0`) | ~1s |
-| **2 — Reasoner** | Deep judgment and device decisions. Gated by hybrid routing — only fires for must-escalate event types or when the Observer flags `escalate=true`. | Claude Sonnet 4.6 | ~2–3s |
+| **1 — Observer** | Fast factual description of what just happened. Emits Beat 1 narration + updates world state + an `escalate` flag. | Gemini 2.5 Flash (`thinking_budget=0`) | ~1s |
+| **2 — Reasoner** | Deep judgment and device decisions. Compounds a session narrative across calls. | Claude Sonnet 4.6 (with ephemeral prompt caching) | ~2–3s |
 
-Shared state lives in an in-memory `WorldState` object. No database, no cross-session persistence.
-
-See `DESIGN.md` for module-level diagrams and data contracts, and `ARCHITECTURE_AND_BUILD_PLAN copy.md` for the living build plan.
+Perception runs constantly. When YOLO or YAMNet detects something, it wakes the Observer; if the Observer flags `escalate=true` (or the event is a must-escalate type), the Reasoner takes over with judgment and device decisions. Shared state lives in an in-memory `WorldState`.
 
 ## Repo layout
 
 ```
 perception/   # Layer 0: camera, YOLO, zones, event detection, audio/YAMNet, smart plugs
-agents/       # Layers 1 & 2: observer, reasoner, world state, baselines, routing, decisions
-actuators/    # TTS + smart plug control wrappers
-server/       # FastAPI + WebSocket hub
-dashboard/    # Next.js + React + Tailwind frontend
-config.py     # API keys, thresholds, device IPs, zone definitions
-main.py       # Orchestrator — starts all layers, manages lifecycle
+agents/       # Layers 1 & 2 + shared state: observer, reasoner, world_state, routing,
+              #   decisions, baselines, empty_room_watcher
+actuators/    # TTS speaker (Beat 1 / Beat 2 queue)
+server/       # FastAPI + WebSocket hub + thread→async broadcaster bridge
+dashboard/    # Next.js 16 + React 19 + Tailwind v4 frontend (App Router)
+tests/        # pytest — perception smoke + DecisionEngine + EmptyRoomWatcher + WorldState
+config.py     # API keys, thresholds, device IPs, zone definitions, routing config
+main.py       # Orchestrator — starts all daemons, runs calibration, drives the main loop
 ```
+
+## Design highlights
+
+| Decision | Why it matters |
+|---|---|
+| **Hybrid Reasoner routing** | Most events stop at the cheap Observer; the expensive Reasoner only fires when something actually warrants judgment. Main cost and latency lever. |
+| **Compounding session model** | The Reasoner rewrites its own `session_narrative` on every call — understanding compounds across the session instead of resetting each tick. |
+| **Code-enforced guardrails** | Five hard checks run before any device command leaves the agent. The Reasoner's judgment is policy; the guardrails are law. |
+| **30-second calibration** | At startup the agent learns the room's audio baseline, idle power, and ambient sounds — anomaly detection is tuned to *this* room. |
 
 ## Tech stack
 
-- **Python 3.11** — core runtime
-- **Ultralytics YOLO26n-pose** — detection, BoT-SORT tracking, 17-keypoint pose
-- **sounddevice + TensorFlow/YAMNet** — 521-class audio monitoring
-- **python-kasa** — TP-Link KP125M smart plug control + energy telemetry
-- **google-genai** — Gemini 2.5 Flash (Observer)
-- **anthropic** — Claude Sonnet 4.6 (Reasoner)
-- **edge-tts / pyttsx3** — text-to-speech
-- **FastAPI + WebSockets** — backend
-- **Next.js + React + Tailwind + Recharts** — dashboard
+- **Python 3.11** — core runtime, threaded + async
+- **Ultralytics YOLO26n-pose** — detection, BoT-SORT tracking, 17-keypoint pose (MPS on Apple Silicon)
+- **sounddevice + TensorFlow/YAMNet** — 521-class audio monitoring with persistence smoothing
+- **python-kasa** — TP-Link KP125M smart plug control + energy telemetry (KLAP auth)
+- **google-genai** — Gemini 2.5 Flash for the Observer (`thinking_budget=0`)
+- **anthropic** — Claude Sonnet 4.6 for the Reasoner, with ephemeral prompt caching
+- **edge-tts** — Microsoft cloud TTS → MP3 → afplay/ffplay
+- **FastAPI + WebSockets** — backend state stream and MJPEG video stream
+- **Next.js 16 + React 19 + Tailwind v4** — App Router dashboard with live agent log panels
+
+## Threading model
+
+Perception, LLM calls, TTS, and the dashboard each run on their own daemon thread so they never block each other — the main loop queues Observer/Reasoner work and polls for results each tick, while a broadcaster bridges the sync perception world to FastAPI's async event loop.
+
+```
+main thread (~30 Hz event loop)
+  ├── camera capture          (daemon)
+  ├── YOLO inference          (daemon — MPS on Apple Silicon)
+  ├── audio capture + YAMNet  (daemon)
+  ├── smart plug poller       (daemon — asyncio loop wrapped in a thread)
+  ├── ObserverWorker          (daemon — Gemini calls, queued)
+  ├── ReasonerWorker          (daemon — Claude calls, queued)
+  ├── TTS speaker             (daemon — Beat 2 waits on Beat 1)
+  ├── FastAPI + WebSocket     (daemon — dashboard server + broadcaster bridge)
+  ├── EmptyRoomWatcher tick   (in-loop, pure logic)
+  └── DecisionEngine          (in-loop — guardrails before any toggle)
+```
 
 ## Setup
-
-Full checklist is in `SETUP.md`. Short version:
 
 ```bash
 python3.11 -m venv venv
@@ -69,24 +100,30 @@ KASA_USERNAME=...    # TP-Link Kasa account email (KLAP auth)
 KASA_PASSWORD=...
 ```
 
-Smart plug IPs, camera/audio indexes, zones, and thresholds live in `config.py`. Plug IPs are hints only — the app re-discovers plugs by alias (`light`, `fan`) at startup.
+Smart plug IPs, camera/audio indexes, zones, and thresholds live in `config.py`. Plug IPs are hints only — the app re-discovers plugs by alias (`light`, `fan`) at startup, since hotspot IPs rotate.
 
 ## Running
+
+The agent runs as two processes side by side — the Python orchestrator and the dashboard. The dashboard is where you actually see what the agent is doing, so run both.
+
+In one terminal, start the agent:
 
 ```bash
 source venv/bin/activate
 python main.py
 ```
 
-On startup the agent runs a ~30s calibration phase to learn the room's audio floor, power profile, occupancy pattern, and persistent YAMNet classes to suppress. After calibration the three layers run concurrently. The Reasoner can be disabled in `config.py` during development to keep API costs near zero.
+On startup it runs a ~30s calibration phase before the three layers go hot. The Reasoner can be disabled in `config.py` during development to keep API costs near zero.
 
-Dashboard (optional):
+In a second terminal, start the dashboard:
 
 ```bash
 cd dashboard
 npm install
 npm run dev
 ```
+
+Opens at `http://localhost:3000` and streams MJPEG video, perception events, Observer narration, Reasoner narration, and DecisionEngine outcomes over WebSocket from `http://127.0.0.1:8000`.
 
 ## Cost profile
 
@@ -96,15 +133,3 @@ Rough per-hour API spend with typical room activity:
 - Full pipeline (Observer + Reasoner via hybrid routing): **~$0.10–0.26/hr**
 
 Cost stays low because the pipeline is event-driven (not polling) and the Reasoner is gated — most events stop at Beat 1.
-
-## Status
-
-Day 2 in progress. Layer 0 is fully implemented and tested. WorldState, calibration, and the Observer (Gemini 2.5 Flash) are wired into the main loop with 0.5s event debouncing and a 30s periodic refresh. Reasoner, TTS, and device-decision logic are the next blocks.
-
-## Docs
-
-- `ARCHITECTURE_AND_BUILD_PLAN copy.md` — living build plan (read Section 0 first)
-- `DESIGN.md` — module diagrams and data contracts
-- `SETUP.md` — per-session startup checklist
-- `LEARNING.md` — running log of surprising findings and corrected assumptions
-- `prompt_engineering.md` — notes on Observer/Reasoner prompt iteration
