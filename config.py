@@ -129,6 +129,7 @@ CALIBRATION_EXCLUDE_SPEECH_FROM_FLOOR = True  # skip speech dB from noise floor 
 # It prints a ready-to-paste ZONES block. See SETUP.md §4c for the walkthrough.
 ZONES: dict[str, list[tuple[int, int]]] = {
     "door": [(964, 338), (875, 373), (1008, 469), (1112, 398)],
+    "desks": [(50, 347), (374, 377), (692, 659), (17, 705)],
 }
 
 # -- LLM toggles (useful during dev) --

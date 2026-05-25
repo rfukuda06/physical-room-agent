@@ -39,7 +39,7 @@ Output contract (JSON):
   }
 
 The `escalate` flag drives the hybrid routing policy — see agents/routing.py
-and ARCHITECTURE_AND_BUILD_PLAN copy.md Section 2.5.
+and ARCHITECTURE_AND_BUILD_PLAN.md Section 2.5.
 
 ---------------------------------------------------------------------------
 Observer → Reasoner contract (read this before implementing the Reasoner)

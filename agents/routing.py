@@ -12,7 +12,7 @@ frequently BoT-SORT track ID re-assignments of the same physical person, not
 real arrivals or departures. If the Observer confirms "room unchanged" and
 didn't escalate, we skip the Reasoner to avoid burning Claude calls on noise.
 
-See ARCHITECTURE_AND_BUILD_PLAN copy.md §2.5 for the rationale.
+See ARCHITECTURE_AND_BUILD_PLAN.md §2.5 for the rationale.
 """
 
 import config

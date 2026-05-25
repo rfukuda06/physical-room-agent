@@ -204,17 +204,56 @@ python main.py
 
 Right now this only prints the loaded config — the full pipeline (perception → agents → actuators) is still being wired up.
 
-## 6. Running the dashboard (later, not yet built)
+## 6. Running the dashboard
 
-When the FastAPI server + Next.js dashboard exist, they'll be started separately:
+The dashboard has two pieces:
+
+- **Backend** — FastAPI app in `server/app.py`. Exposes an HTTP config endpoint, an MJPEG video stream of the annotated YOLO frames, and a WebSocket carrying live events / world-state snapshots / Observer & Reasoner narrations.
+- **Frontend** — Next.js app in `dashboard/`. Subscribes to the WebSocket via `dashboard/lib/useDashboardStream.ts` and renders the panels in `dashboard/components/`.
+
+**You only start the frontend yourself.** The backend is auto-launched by the orchestrator: `main.py:172` calls `run_server_in_thread(host="127.0.0.1", port=8000)` during boot, which spins up uvicorn (the ASGI server that actually speaks HTTP/WebSocket) on a daemon thread alongside the perception loop. So step 5 already gives you a live backend.
 
 ```bash
-# Terminal A — backend
-uvicorn server.main:app --reload
+# Terminal A — perception loop + dashboard backend (single process)
+source venv/bin/activate
+python main.py
+# → FastAPI backend now on http://127.0.0.1:8000
 
-# Terminal B — frontend
-cd dashboard && npm run dev
+# Terminal B — Next.js dashboard
+cd dashboard
+npm run dev
+# → open http://localhost:3000 in a browser
 ```
+
+Backend endpoints (defined in `server/app.py`):
+
+| Method | Path            | Purpose                                                                 |
+|--------|-----------------|-------------------------------------------------------------------------|
+| GET    | `/`             | Health check — returns `"Newton-for-a-Room dashboard backend — ok"`.    |
+| GET    | `/config`       | One-shot config payload (zones, camera dims, thresholds, agent flags).  |
+| GET    | `/video/stream` | MJPEG stream of the latest annotated YOLO frame.                        |
+| WS     | `/ws/state`     | Live events, world-state snapshots, Observer + Reasoner narrations.     |
+
+**First time on a new machine**, install Node deps before `npm run dev`:
+
+```bash
+cd dashboard
+npm install
+```
+
+**Heads-up on Next.js version:** `dashboard/AGENTS.md` notes this Next.js has breaking changes from older conventions, so consult `node_modules/next/dist/docs/` before editing dashboard code rather than going from memory.
+
+### How the two halves are bridged
+
+The perception loop is a bunch of synchronous Python threads (YOLO, audio, plug poller). FastAPI's handlers are async coroutines on one event loop. They can't share data structures naively. The glue is `server/broadcaster.py`, a singleton `DashboardBroadcaster` that:
+
+1. Captures a reference to FastAPI's event loop at startup (`bind_loop()`).
+2. Exposes thread-safe `publish_event/snapshot/narration/frame` methods that the perception threads call.
+3. Uses `asyncio.run_coroutine_threadsafe` to enqueue messages onto each connected WebSocket client's queue from any thread without races.
+
+**FastAPI + WebSocket in one paragraph (for first-timers):** FastAPI is a Python web framework built on Starlette + Pydantic; a function decorated with `@app.get("/path")` becomes an HTTP handler. WebSocket handlers (`@app.websocket("/ws/state")`) are different — they accept a long-lived connection and you call `await ws.send_json(...)` to push messages whenever you want, instead of returning a single response. That's what makes "live" dashboards possible: the server can push without the client polling.
+
+**Next.js + React in one paragraph:** Next.js is a framework around React that gives you file-based routing (`app/page.tsx` becomes `/`), a dev server with hot reload (`npm run dev`), and a build pipeline. React itself is a UI library where components are functions returning JSX; state lives in hooks like `useState` and `useEffect`. The `useDashboardStream` hook in `dashboard/lib/` is a custom hook that opens the WebSocket once on mount, parses incoming JSON, and feeds it into component state so the panels re-render on every new event.
 
 ---
 
