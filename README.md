@@ -1,6 +1,6 @@
 # Physical Room Agent
 
-An always-on Physical AI agent that turns a single room into something it can perceive, narrate, and act on. It fuses live video, microphone audio, and smart-plug telemetry into one running understanding of the room — reasoning about who's there and what they're doing, speaking what it sees out loud, and controlling connected devices to match.
+An always-on Physical AI agent that turns a single room into something it can perceive, narrate, and act on. It fuses live video, microphone audio, and smart-plug telemetry into one running understanding of the room. It reasons about who's there and what they're doing, speaking what it sees out loud, and controlling connected devices.
 
 ## Demo
 
