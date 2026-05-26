@@ -30,6 +30,58 @@ Three layers with a "two-beat rhythm":
 
 Perception runs constantly. When YOLO or YAMNet detects something, it wakes the Observer; if the Observer flags `escalate=true` (or the event is a must-escalate type), the Reasoner takes over with judgment and device decisions. Shared state lives in an in-memory `WorldState`.
 
+## Data flow
+
+```
+                                   camera + mic + plug telemetry
+                                                 │
+                                                 ▼
+   ┌────────────────────┐         ┌─────────────────────────────────┐
+   │                    │ ◄─────► │           Perception            │
+   │                    │         └────────────────┬────────────────┘
+   │                    │                          │ Events:
+   │                    │                          │   new_person · pose_change ·
+   │                    │                          │   zone_transition · audio_spike ·
+   │                    │                          │   speech_start
+   │                    │                          │ + current frame + WorldState snapshot
+   │                    │                          ▼
+   │ WorldState         │         ┌─────────────────────────────────┐
+   │                    │ ◄─────► │            Observer             │ ──► Observer Narration
+   │ shared in-memory   │         └────────────────┬────────────────┘
+   │ state, read and    │                          │ world_state_update
+   │ written by every   │                          │ escalate flag
+   │ layer. Compounds   │                          ▼
+   │ understanding      │         ┌─────────────────────────────────┐
+   │ across the session │ ◄─────► │            Reasoner             │ ──► Reasoner Narration
+   │                    │         └────────────────┬────────────────┘
+   │                    │                          │ lamp / fan commands
+   │                    │                          │ session_narrative · activity_label
+   │                    │                          ▼
+   │                    │         ┌─────────────────────────────────┐
+   │                    │         │         DecisionEngine          │
+   │                    │         │   5 guardrails:                 │
+   │                    │         │     override lockout · cooldown │
+   │                    │         │     idempotency · no-person-ON  │
+   │                    │         │     plug availability           │
+   │                    │         └────────────────┬────────────────┘
+   │                    │                          │ accepted toggles
+   │                    │                          ▼
+   └────────────────────┘                     ┌─────────┐
+                                              │  Plugs  │
+                                              └─────────┘
+
+                      Each layer broadcasts data to the Dashboard via WebSocket.
+```
+
+## Design highlights
+
+| Decision | Why it matters |
+|---|---|
+| **Hybrid Reasoner routing** | Most events stop at the cheap Observer; the expensive Reasoner only fires when something actually warrants judgment. Main cost and latency lever. |
+| **Compounding session model** | The Reasoner rewrites its own `session_narrative` on every call — understanding compounds across the session instead of resetting each tick. |
+| **Code-enforced guardrails** | Five hard checks run before any device command leaves the agent. The Reasoner's judgment is policy; the guardrails are law. |
+| **30-second calibration** | At startup the agent learns the room's audio baseline, idle power, and ambient sounds — anomaly detection is tuned to *this* room. |
+
 ## Repo layout
 
 ```
@@ -44,26 +96,17 @@ config.py     # API keys, thresholds, device IPs, zone definitions, routing conf
 main.py       # Orchestrator — starts all daemons, runs calibration, drives the main loop
 ```
 
-## Design highlights
-
-| Decision | Why it matters |
-|---|---|
-| **Hybrid Reasoner routing** | Most events stop at the cheap Observer; the expensive Reasoner only fires when something actually warrants judgment. Main cost and latency lever. |
-| **Compounding session model** | The Reasoner rewrites its own `session_narrative` on every call — understanding compounds across the session instead of resetting each tick. |
-| **Code-enforced guardrails** | Five hard checks run before any device command leaves the agent. The Reasoner's judgment is policy; the guardrails are law. |
-| **30-second calibration** | At startup the agent learns the room's audio baseline, idle power, and ambient sounds — anomaly detection is tuned to *this* room. |
-
 ## Tech stack
 
 - **Python 3.11** — core runtime, threaded + async
+- **Gemini 2.5 Flash** — Observer model (`thinking_budget=0`, via `google-genai`)
+- **Claude Sonnet 4.6** — Reasoner model, with ephemeral prompt caching (via `anthropic`)
 - **Ultralytics YOLO26n-pose** — detection, BoT-SORT tracking, 17-keypoint pose (MPS on Apple Silicon)
-- **sounddevice + TensorFlow/YAMNet** — 521-class audio monitoring with persistence smoothing
-- **python-kasa** — TP-Link KP125M smart plug control + energy telemetry (KLAP auth)
-- **google-genai** — Gemini 2.5 Flash for the Observer (`thinking_budget=0`)
-- **anthropic** — Claude Sonnet 4.6 for the Reasoner, with ephemeral prompt caching
-- **edge-tts** — Microsoft cloud TTS → MP3 → afplay/ffplay
+- **TensorFlow/YAMNet** — 521-class audio monitoring with persistence smoothing
 - **FastAPI + WebSockets** — backend state stream and MJPEG video stream
 - **Next.js 16 + React 19 + Tailwind v4** — App Router dashboard with live agent log panels
+- **python-kasa** — TP-Link KP125M smart plug control + energy telemetry (KLAP auth)
+- **edge-tts** — Microsoft cloud TTS → MP3 → afplay/ffplay
 
 ## Threading model
 
