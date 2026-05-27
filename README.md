@@ -45,16 +45,16 @@ Perception runs constantly. When YOLO or YAMNet detects something, it wakes the 
    │                    │                          │   speech_start
    │                    │                          │ + current frame + WorldState snapshot
    │                    │                          ▼
-   │ WorldState         │         ┌─────────────────────────────────┐
+   │                    │         ┌─────────────────────────────────┐
    │                    │ ◄─────► │            Observer             │ ──► Observer Narration
-   │ shared in-memory   │         └────────────────┬────────────────┘
-   │ state, read and    │                          │ world_state_update
-   │ written by every   │                          │ escalate flag
-   │ layer. Compounds   │                          ▼
-   │ understanding      │         ┌─────────────────────────────────┐
-   │ across the session │ ◄─────► │            Reasoner             │ ──► Reasoner Narration
-   │                    │         └────────────────┬────────────────┘
-   │                    │                          │ lamp / fan commands
+   │ WorldState         │         └────────────────┬────────────────┘
+   │                    │                          │ world_state_update
+   │ shared in-memory   │                          │ escalate flag
+   │ state, read and    │                          ▼
+   │ written by every   │         ┌─────────────────────────────────┐
+   │ layer. Compounds   │ ◄─────► │            Reasoner             │ ──► Reasoner Narration
+   │ understanding      │         └────────────────┬────────────────┘
+   │ across the session │                          │ lamp / fan commands
    │                    │                          │ session_narrative · activity_label
    │                    │                          ▼
    │                    │         ┌─────────────────────────────────┐
