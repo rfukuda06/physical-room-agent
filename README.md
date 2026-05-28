@@ -4,7 +4,7 @@ An always-on Physical AI agent that turns a single room into something it can pe
 
 ## Demo
 
-<video src="https://github.com/rfukuda06/physical-room-agent/raw/main/docs/physical-ai-demo.mp4" controls width="100%"></video>
+![Physical Room Agent demo](docs/physical-ai-demo.mp4)
 
 [Watch the demo](docs/physical-ai-demo.mp4)
 
