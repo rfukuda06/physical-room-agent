@@ -25,11 +25,8 @@ export default function Home() {
       <header className="flex shrink-0 items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold text-zinc-100">
-            Newton-for-a-Room
+            Physical AI Room Agent
           </h1>
-          <div className="text-[11px] text-zinc-500">
-            Physical AI Room Agent dashboard
-          </div>
         </div>
         <div className="flex items-center gap-2 text-xs">
           <span

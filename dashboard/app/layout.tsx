@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Newton-for-a-Room — Dashboard",
+  title: "Physical AI Room Agent — Dashboard",
   description: "Live view of the Physical AI Room Agent",
 };
 
