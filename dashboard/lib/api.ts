@@ -11,11 +11,14 @@ export const CONFIG_URL = "/backend/config";
 
 // WebSocket can't use the Next.js rewrite proxy (rewrites are HTTP-only),
 // so we connect directly to the backend. CORS doesn't apply to WebSocket
-// handshakes the same way, so cross-origin WS works fine.
+// handshakes the same way, so cross-origin WS works fine. The port must
+// match main.py's run_server_in_thread; override via NEXT_PUBLIC_BACKEND_PORT
+// in .env.local so a port change in one place doesn't require code edits.
+const BACKEND_PORT = process.env.NEXT_PUBLIC_BACKEND_PORT || "8005";
 export const STATE_WS_URL =
   typeof window !== "undefined"
-    ? `ws://${window.location.hostname}:8000/ws/state`
-    : "ws://127.0.0.1:8000/ws/state";
+    ? `ws://${window.location.hostname}:${BACKEND_PORT}/ws/state`
+    : `ws://127.0.0.1:${BACKEND_PORT}/ws/state`;
 
 // ---- Config (one-shot on page load) ----
 export type DashboardConfig = {

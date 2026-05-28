@@ -169,8 +169,8 @@ def main() -> None:
     # Start the dashboard server early so it can serve /config and a warm-up
     # MJPEG stream (just placeholder frames) while the rest of the pipeline
     # boots. Any publish_* calls before a client connects are no-ops.
-    run_server_in_thread(host="127.0.0.1", port=8000)
-    print("  Dashboard:          http://127.0.0.1:8000")
+    run_server_in_thread(host="0.0.0.0", port=8005)
+    print("  Dashboard:          http://127.0.0.1:8005 (also reachable on this Mac's LAN IPs)")
     print(f"  Camera index:       {config.CAMERA_INDEX}")
     print(f"  Audio device:       {config.AUDIO_DEVICE_NAME}")
     print(f"  Zones loaded:       {list(config.ZONES.keys()) or '(none)'}")
